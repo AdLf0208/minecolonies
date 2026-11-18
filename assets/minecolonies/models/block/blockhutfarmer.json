@@ -1,0 +1,79 @@
+{
+  "elements": [
+    {
+      "faces": {
+        "down": {
+          "cullface": "down",
+          "texture": "#minecolonies:block/blockhutfarmer",
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ]
+        },
+        "east": {
+          "texture": "#minecolonies:block/blockhutfarmer",
+          "uv": [
+            0,
+            0,
+            16,
+            8
+          ]
+        },
+        "north": {
+          "texture": "#minecolonies:block/blockhutfarmer",
+          "uv": [
+            0,
+            0,
+            16,
+            8
+          ]
+        },
+        "south": {
+          "texture": "#minecolonies:block/blockhutfarmer",
+          "uv": [
+            0,
+            0,
+            16,
+            8
+          ]
+        },
+        "up": {
+          "texture": "#minecolonies:block/blockhutfarmer",
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ]
+        },
+        "west": {
+          "texture": "#minecolonies:block/blockhutfarmer",
+          "uv": [
+            0,
+            0,
+            16,
+            8
+          ]
+        }
+      },
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        16,
+        8,
+        16
+      ]
+    }
+  ],
+  "textures": {
+    "bottom": "minecolonies:block/blockhutfarmer",
+    "particle": "minecolonies:block/blockhutfarmer",
+    "side": "minecolonies:block/blockhutfarmer",
+    "top": "minecolonies:block/blockhutfarmer"
+  }
+}

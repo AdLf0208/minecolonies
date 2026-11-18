@@ -1,0 +1,6 @@
+{
+  "components": {
+    "minecraft:max_damage": 250
+  },
+  "template": "minecraft:iron_hoe"
+}

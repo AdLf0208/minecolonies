@@ -1,0 +1,6 @@
+{
+  "attributes": {
+    "minecraft:max_health": 20.0
+  },
+  "template": "minecraft:villager"
+}

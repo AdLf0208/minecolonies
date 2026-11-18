@@ -1,0 +1,29 @@
+{
+  "format": "flat-sdk-hmod/0.2",
+  "horizon_revision": "0b14f8acfd97fa2c750e42795249dcc981178ca4",
+  "horizon_mixins_revision": "e59da9094f0c2fdda6c627fe9eff22dec6a906f0",
+  "horizon_repository": "https://github.com/horizon-rust/horizon",
+  "horizon_mixins_repository": "https://github.com/horizon-rust/horizon-mixins",
+  "api": "0.2",
+  "sdk_surface": "72aaa95c202eab29e6ae1de93f8179fc",
+  "package_format": 6,
+  "game": "26.3",
+  "package": "minecolonies.hmod",
+  "package_sha256": "0d014f3f5973b23c6544e4d860e10b59fd02deb3e3d72c63de377102272bbda5",
+  "package_size": 53767,
+  "ported_source_sha256": {
+    "src/runtime.rs": "cca59b398d2ed9c870e5820fa1ca764f0adb5d5ddf3a3783cf369dc30351299e"
+  },
+  "history": {
+    "0.1.1": {
+      "format": "hnmod/mixin-schema-6",
+      "horizon_revision": "9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0",
+      "horizon_mixins_revision": "5a64af938ec86b00d53d16a408aabc0038fb3e57",
+      "source_sha256": {
+        "crates/horizon-client/src/game.rs": "ad235ca7b9fb4170d246b9f1f5dc5ed8608168b64d57ff0040d0111a686ce81d"
+      },
+      "submission": 951,
+      "archived_at": "ports/_shared/evidence/minecolonies/legacy/"
+    }
+  }
+}

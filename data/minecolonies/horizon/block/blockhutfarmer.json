@@ -1,0 +1,25 @@
+{
+  "default_state": {
+    "facing": "north"
+  },
+  "item": true,
+  "properties": {
+    "explosion_resistance": 1200.0,
+    "hardness": 10.0,
+    "occludes": false,
+    "requires_tool": false,
+    "sounds": "minecraft:oak_planks"
+  },
+  "state_properties": {
+    "facing": {
+      "type": "enum",
+      "values": [
+        "north",
+        "south",
+        "east",
+        "west"
+      ]
+    }
+  },
+  "template": "minecraft:stone"
+}

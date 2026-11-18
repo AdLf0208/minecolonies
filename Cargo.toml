@@ -1,0 +1,20 @@
+[package]
+# Ported from: MineColonies 1.1.1411-1.21.1-snapshot (ldtteam/minecolonies, GPL-3.0 code, art
+# All Rights Reserved and regenerated here, never copied), Minecraft Java 1.21.1 NeoForge.
+# Local-only until the maintainer approves publishing. Cargo's name/version are not the mod's
+# identity: `horizon-mod.toml` is (id `minecolonies`, version 0.2.0).
+name = "mod-minecolonies"
+version = "0.2.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "MineColonies for Horizon: a town hall founds a colony and one citizen farms"
+publish = false
+
+[dependencies]
+# The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod` command
+# (the launcher builds against its own copy of the same build).
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
+
+# The campaign's Rust rule: warnings are errors on the ladder, not in the manifest.
+[lints.rust]
+unsafe_code = "forbid"

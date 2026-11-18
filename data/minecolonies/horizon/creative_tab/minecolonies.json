@@ -1,0 +1,9 @@
+{
+  "icon": "minecolonies:blockhuttownhall",
+  "items": [
+    "minecolonies:blockhuttownhall",
+    "minecolonies:blockhutfarmer",
+    "minecolonies:scythe"
+  ],
+  "title": "itemGroup.minecolonies"
+}

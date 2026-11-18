@@ -1,0 +1,17 @@
+{
+  "category": "misc",
+  "key": {
+    "H": "minecraft:iron_hoe",
+    "P": "#minecraft:planks"
+  },
+  "pattern": [
+    "PPP",
+    "PHP",
+    "PPP"
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecolonies:blockhutfarmer"
+  },
+  "type": "minecraft:crafting_shaped"
+}

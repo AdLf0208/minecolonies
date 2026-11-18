@@ -1,0 +1,17 @@
+{
+  "category": "misc",
+  "key": {
+    "C": "minecraft:crafting_table",
+    "P": "#minecraft:planks"
+  },
+  "pattern": [
+    "PPP",
+    "PCP",
+    "PPP"
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecolonies:blockhuttownhall"
+  },
+  "type": "minecraft:crafting_shaped"
+}

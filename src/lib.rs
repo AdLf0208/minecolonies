@@ -1,0 +1,71 @@
+//! MineColonies for Horizon — slice 1: a town hall founds a colony, one citizen joins it and
+//! farms, and `/minecolonies colony|citizen|job` is the configuration surface.
+//!
+//! The one `impl Hooks` at the crate root: every method is a *moment* the game tells mods
+//! about, and each forwards to `support` (the game-side glue) or, through it, to `runtime` (the
+//! pure colony rules, which have no `mod_api` type and are tested by `cargo test` alone).
+//!
+//! | moment | what this port does |
+//! |---|---|
+//! | `register` | declares the two hut block entity types; attaches the citizen's `EntityPart` |
+//! | `entity_place` | refuses a town hall that may not found a colony (the only cancel point) |
+//! | `level_tick_post` (server) | completes a placement's colony / hut marker, one tick later |
+//! | `register_commands` | `/minecolonies …` and the mod's own `mc` alias |
+//! | `run_mod_command` | runs a parsed `/minecolonies …` usage |
+//!
+//! The citizen's job is **not** a global hook: it is the `EntityPart` in `parts`, called for
+//! `minecolonies:citizen` rows only. The colony is **not** a global scan either: it is one
+//! attachment per town hall block entity (`support::COLONY`), which is what the SDK exposes
+//! instead of an enumeration of the world's block entities.
+use mod_api::{
+    self, EntityPlaceEvent, Flow, Hooks, HostSide, LevelTickPostEvent, RegisterCommandsEvent,
+    Registrar, RegistrationContext, RunModCommandEvent, ServerHost,
+};
+
+#[cfg(not(target_arch = "wasm32"))]
+mod parts;
+mod runtime;
+mod support;
+
+/// The mod: a marker type, one instance, every method stateless (the colony lives in the world).
+#[derive(Default)]
+struct Mod;
+
+#[mod_api::horizon_mod]
+impl Hooks for Mod {
+    /// Declares the hut block entity types and attaches the citizen's Part, before any world
+    /// opens.
+    fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+        support::register(r);
+    }
+
+    /// A block is about to be placed (`BlockEvent.EntityPlaceEvent`). A town hall that could not
+    /// found a colony is refused here, because this is the only moment that can still stop the
+    /// write; a legal one is queued and completed at that level's `level_tick_post`, once the block exists.
+    fn entity_place(&self, host: &mut dyn ServerHost, event: &mut EntityPlaceEvent) -> Flow {
+        support::on_entity_place(host, event)
+    }
+
+    /// The end of a level's tick, on the server: completes the placements queued in *that* level
+    /// (the colony record, the farmer's hut marker). A level-scoped hook, not `server_tick`,
+    /// because the colony is written through the level's own attachment store.
+    fn level_tick_post(&self, host: HostSide<'_>, event: &mut LevelTickPostEvent) {
+        if let HostSide::Server(host) = host {
+            support::on_level_tick_post(host, event.level);
+        }
+    }
+
+    /// `/minecolonies …` (and the mod's `mc` alias), plus the `citizens` spelling it also uses.
+    fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
+        support::on_register_commands(event);
+    }
+
+    /// A parsed `/minecolonies …` usage: resolved arguments, no string splitting.
+    fn run_mod_command(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut RunModCommandEvent<'_>,
+    ) -> Flow {
+        support::on_run_mod_command(host, event)
+    }
+}
