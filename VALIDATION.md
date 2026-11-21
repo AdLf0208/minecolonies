@@ -1,9 +1,56 @@
-# VALIDATION — MineColonies slices 1 and 2
+# VALIDATION — MineColonies slices 1, 2 and 3
 
 Validated on Linux with Rust 1.99.1 against **Horizon
 `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** (Nightly 2026-11-20) and horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, through `ports/tools/build-slot.sh`
 (`BUILD_LOCAL=1`, `CARGO_INCREMENTAL=0`, no bare `cargo`, no `--target-dir`).
+
+## 0.2.5 — slice 3, the two jobs' buildings (2026-11-21)
+
+| Check | Command | Result |
+|---|---|---|
+| rules first (red) | `cargo test --offline`, the new rules as `panic!()` bodies | **54 passed, 4 failed** — `a job's building` / `not implemented: a job's building status` / `not implemented: the hut blocks` (`sdk-test-slice3-red.log`) |
+| tests | `cargo test --offline --locked` | **59 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --offline --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`sdk-clippy.log`) |
+| format | `cargo fmt --check` | `FMT_EXIT:0` (`sdk-fmt.log`) |
+| package, twice | `rm -f Cargo.lock && cargo horizon-mod build` ×2, `cmp` | `CMP:identical`, **71,966 B**, sha256 `9fbb989826e8b472ef026467286fc2af9b84b5b7134424a40e8235ba5043a635` (`sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.log`) |
+| registry check | `cargo horizon-mod check minecolonies.hmod` | `minecolonies 0.2.5 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`; 71,966 B, sha `9fbb9898…` (`sdk-check.log`, run against that sha) |
+| source compile | `cargo horizon-mod check --uses minecolonies.hmod` | `USES_EXIT:0` (`sdk-check-uses.log`) |
+| fits the pin | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, sha `9fbb9898…` (`sdk-fits.log`) |
+| fits another build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, sha `9fbb9898…` (`sdk-fits-other.log`) |
+| content | `python3 tools/gen_assets.py --check` + `tools/assemble_content.py --check` | **25** assets byte-identical, `data/` matches (`sdk-assets.log`) |
+| no jar-derived asset | sha256 of every `assets/` file against every jar entry | tree 25 files / 14,006 B; **jar-derived asset bytes: 0**, files matched 0, over 22,747 jar entries (`sdk-provenance.log`) |
+| package contents | unzip listing | **53 files**, `LICENSE` + `LICENSE-NOTICE.md`, no `Cargo.lock` (`sdk-entries.txt`) |
+| gate | `python3 ports/tools/verify-sdk-package.py minecolonies` | **1/1 package(s) verified** |
+| game build | `ports/tools/launcher-game.sh build minecolonies` | `Compiling minecolonies (1 of 1)` |
+| in game | `build-slot.sh run … --step e2e -- bash tools/e2e.sh` | **PASS**, `EXIT:0`, phases A–N (`minecolonies-e2e/e2e-launcher.log`) |
+| control | `GAME=$CONTROL_GAME … tools/e2e.sh` | **FAIL** `ctl place of minecolonies:blockhuttownhall … failed` / `Unknown item 'minecolonies:blockhuttownhall'`, `EXIT:1` (`e2e-launcher-control.log`) |
+| control inside one run | `CONTROL=1 … tools/e2e.sh` | control leg *"without the package: no town hall item"*, then modded **PASS** `EXIT:0` (`e2e-launcher-control-inside.log`) |
+| fail-capability (depth) | `SELFTEST=1 … tools/e2e.sh` | **FAIL** `the miner did not dig 9 blocks above the bedrock`, `EXIT:1` (`e2e-selftest.log`) |
+| fail-capability (break) | `HUT_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the broken hut reads missing, so the marker went with the block`, `EXIT:1` (`e2e-hut-selftest.log`) |
+| fail-capability (founding) | `FOUNDING_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the second town hall was refused, as it should be`, `EXIT:1` (`e2e-founding-selftest.log`) |
+| log gate | `python3 ports/tools/check-e2e-logs.py minecolonies-e2e --strict` | `logs=6 ok=6`, exit 0 |
+| coverage | `python3 ports/tools/check-coverage.py minecolonies` | `missing_families=0 … missing=0`, exit 0 |
+
+The in-game leg's new assertions (L1–L3, M1), from `e2e-launcher.log`:
+
+```
+== L1: the lumberjack's hut is its building: without it the assignment is refused ==
+  without its hut: A lumberjack needs lumberjack's hut in the colony: place minecolonies:blockhutlumberjack.
+== L2: the hut is placed, job info reads it, and the tree falls ==
+  Bo: job Lumberjack, colony Riverside (3 crops harvested), 0 logs felled, 0 blocks mined, lumberjack's hut present.
+  after the fell: soil at 2004,101,-1 is 'minecraft:dirt', stump is 'minecraft:oak_sapling',
+    chest [{"count":4,"item":"minecraft:oak_log"}]
+== L3: breaking the hut takes the building with it ==
+  after the break: Bo: job Lumberjack, …, lumberjack's hut missing.
+== M1: the mine is the miner's building ==
+  Cass: job Miner, …, mine present.
+  the shaft is 1x1 and 8 deep, the bedrock untouched, 8 cobblestone in the chest
+== N: the carried recipes craft, and the carried items are real ids ==
+  lumberjack's hut: planks around a crafting table and a wooden axe -> {"count": 1, "item": "minecolonies:blockhutlumberjack", …}
+  mine: planks around a crafting table and a wooden pickaxe -> {"count": 1, "item": "minecolonies:blockhutminer", …}
+  lumberjack's hut with a stick where the axe goes -> null
+```
 
 ## 0.2.4 — slice 2, the `lumberjack` and `miner` jobs (2026-11-21)
 

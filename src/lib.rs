@@ -18,8 +18,8 @@
 //! attachment per town hall block entity (`support::COLONY`), which is what the SDK exposes
 //! instead of an enumeration of the world's block entities.
 use mod_api::{
-    self, EntityPlaceEvent, Flow, Hooks, HostSide, LevelTickPostEvent, RegisterCommandsEvent,
-    Registrar, RegistrationContext, RunModCommandEvent, ServerHost,
+    self, EntityPlaceEvent, Flow, Hooks, HostSide, LevelTickPostEvent, PlayerDestroyedBlockEvent,
+    RegisterCommandsEvent, Registrar, RegistrationContext, RunModCommandEvent, ServerHost,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -47,12 +47,22 @@ impl Hooks for Mod {
     }
 
     /// The end of a level's tick, on the server: completes the placements queued in *that* level
-    /// (the colony record, the farmer's hut marker). A level-scoped hook, not `server_tick`,
-    /// because the colony is written through the level's own attachment store.
+    /// (the colony record, the hut marker). A level-scoped hook, not `server_tick`, because the
+    /// colony is written through the level's own attachment store.
     fn level_tick_post(&self, host: HostSide<'_>, event: &mut LevelTickPostEvent) {
         if let HostSide::Server(host) = host {
             support::on_level_tick_post(host, event.level);
         }
+    }
+
+    /// A player's break removed a block: a hut's marker goes with it, so a broken building is
+    /// `missing` to `job info` and its job stops (upstream's building is the job's own block).
+    fn player_destroyed_block(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut PlayerDestroyedBlockEvent,
+    ) {
+        support::on_player_destroyed_block(host, event);
     }
 
     /// `/minecolonies …` (and the mod's `mc` alias), plus the `citizens` spelling it also uses.

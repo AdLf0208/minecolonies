@@ -25,11 +25,11 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    AIR, CITIZEN, Citizen, Colony, FARMER_HUT, FARMER_REACH, Job, LUMBERJACK_REACH,
-    LUMBERJACK_SEARCH, MAX_COLONY_SIZE_CHUNKS, Owner, Pos, Step, TOWN_HALL, TownHall, Value, WHEAT,
-    WHEAT_MAX_AGE, WHEAT_REPLANT_AGE, clamp_size, colony_fields, colony_from_fields, colony_tag,
-    default_name, farmer_step, founding_refusal, grows_a_sapling, hire_refusal,
-    horizontal_distance, is_log, lumberjack_step, may_manage, miner_next, radius_blocks,
+    AIR, CITIZEN, Citizen, Colony, FARMER_HUT, FARMER_REACH, Job, LUMBERJACK_HUT, LUMBERJACK_REACH,
+    LUMBERJACK_SEARCH, MAX_COLONY_SIZE_CHUNKS, MINER_HUT, Owner, Pos, Step, TOWN_HALL, TownHall,
+    Value, WHEAT, WHEAT_MAX_AGE, WHEAT_REPLANT_AGE, clamp_size, colony_fields, colony_from_fields,
+    colony_tag, default_name, farmer_step, founding_refusal, grows_a_sapling, hire_refusal,
+    horizontal_distance, is_hut, is_log, lumberjack_step, may_manage, miner_next, radius_blocks,
     read_colony_tag, sapling_for, should_work, tree_at,
 };
 
@@ -68,10 +68,10 @@ static COLONY: AttachmentType<Colony> = AttachmentType {
     sync: false,
 };
 
-/// A farmer's hut standing in a colony: the building a farmer's job needs.
+/// A hut standing in a colony: which building it is, so one marker answers every job's rule.
 static HUT: AttachmentType<HutMarker> = AttachmentType {
     namespace: "minecolonies",
-    name: "farmer_hut",
+    name: "hut",
     default: HutMarker::default,
     codec: Some(AttachmentCodec {
         encode: encode_hut,
@@ -81,9 +81,12 @@ static HUT: AttachmentType<HutMarker> = AttachmentType {
     sync: false,
 };
 
-/// The farmer's hut marker's value: the block is the information, so there is nothing to store.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct HutMarker;
+/// The hut marker's value: the block's id, which is the building the job's rule asks for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HutMarker {
+    /// The hut block (`minecolonies:blockhutfarmer`, …).
+    pub(crate) building: String,
+}
 
 /// The value an absent colony reads as. `COLONY` is only ever read with `get_existing`, so this
 /// is never stored; it exists because `AttachmentType` asks for a default.
@@ -135,12 +138,19 @@ fn decode_colony(saved: &Compound) -> Result<Colony, AttachmentError> {
     colony_from_fields(&fields).map_err(|_| AttachmentError::Decode)
 }
 
-fn encode_hut(_marker: &HutMarker) -> Result<Compound, AttachmentError> {
-    Ok(Compound::new())
+fn encode_hut(marker: &HutMarker) -> Result<Compound, AttachmentError> {
+    let mut saved = Compound::new();
+    saved.insert(
+        "Building".into(),
+        Tag::String(marker.building.as_str().into()),
+    );
+    Ok(saved)
 }
 
-fn decode_hut(_saved: &Compound) -> Result<HutMarker, AttachmentError> {
-    Ok(HutMarker)
+fn decode_hut(saved: &Compound) -> Result<HutMarker, AttachmentError> {
+    text_of(saved, "Building")
+        .map(|building| HutMarker { building })
+        .ok_or(AttachmentError::Decode)
 }
 
 fn read_fields(map: &Compound) -> Vec<(&'static str, Value)> {
@@ -238,12 +248,17 @@ fn write_colony(host: &mut dyn ServerHost, pos: [i32; 3], colony: &Colony) {
     let _ = COLONY.set(host.attachments(), Holder::BlockEntity(pos), colony.clone());
 }
 
-/// Whether a farmer's hut stands inside the colony: the building a farmer's job needs.
-fn has_farmers_hut(host: &dyn Host, colony: &Colony) -> bool {
+/// Whether the building `building` stands inside the colony: the block a job's rule asks for.
+/// One query answers every job — the marker says *which* hut it is (`Job::building`), so a new
+/// job needs a constant, not a new attachment.
+fn has_building(host: &dyn Host, colony: &Colony, building: &str) -> bool {
     let Ok(query) = host.query(&HUT) else {
         return false;
     };
     query.iter().flatten().any(|row| {
+        if row.value.building != building {
+            return false;
+        }
         let AttachmentHolder::BlockEntity(entity) = row.holder else {
             return false;
         };
@@ -295,18 +310,24 @@ const OWNER_ONLY: &str = "Only a colony's owner may manage it: found one with a 
 // Declaration: the block entity types and the citizen's Part
 // ---------------------------------------------------------------------------
 
-/// The town hall keeps the colony and the farmer's hut marks where a farmer may work: both get a
-/// declared block entity type, which is what creates their block entity (the retired bundle's
-/// `block_entity` hook). The colony itself is the `COLONY` attachment on that block entity.
+/// The town hall keeps the colony and each hut marks where a job's building stands: all of them
+/// get a declared block entity type, which is what creates their block entity (the retired
+/// bundle's `block_entity` hook). The colony itself is the `COLONY` attachment on the hall's.
 pub(crate) fn register(r: &mut dyn mod_api::Registrar) {
     let hall = r
         .block_entity_type("town_hall")
         .blocks(&["blockhuttownhall"])
         .build();
-    let _ = r
-        .block_entity_type("farmer_hut")
-        .blocks(&["blockhutfarmer"])
-        .build();
+    // One type per hut; the block id is `HUTS`' own, so the declaration cannot drift from the
+    // rule that reads the marker.
+    for (type_id, hut) in [
+        ("farmer_hut", FARMER_HUT),
+        ("lumberjack_hut", LUMBERJACK_HUT),
+        ("miner_hut", MINER_HUT),
+    ] {
+        let block = hut.strip_prefix("minecolonies:").unwrap_or(hut);
+        let _ = r.block_entity_type(type_id).blocks(&[block]).build();
+    }
     // Entity Parts are native-only: the API attaches code to an entity type, and a wasm mod
     // cannot (yet). A wasm build therefore registers the huts and has no citizen tick.
     #[cfg(not(target_arch = "wasm32"))]
@@ -321,12 +342,24 @@ pub(crate) fn register(r: &mut dyn mod_api::Registrar) {
 // Founding
 // ---------------------------------------------------------------------------
 
+/// What a placement this mod completes once the block exists turns into.
+enum PendingKind {
+    /// A town hall that founds a colony for the player who placed it.
+    Founding {
+        player: u128,
+        owner: Owner,
+        name: String,
+    },
+    /// A hut that marks where its job's building stands.
+    Building { block: String },
+}
+
 /// A placement this mod completes once the block exists.
 struct Pending {
     dimension: String,
     pos: [i32; 3],
-    /// The owner a town hall is founded for; `None` for a hut marker.
-    owner: Option<(u128, Owner, String)>,
+    /// What the placement becomes.
+    kind: PendingKind,
     /// Level ticks that did not match this placement's dimension, so a level that never ticks
     /// cannot leave it queued forever.
     misses: u32,
@@ -354,11 +387,11 @@ pub(crate) fn on_entity_place(
     event: &mut mod_api::EntityPlaceEvent,
 ) -> Flow {
     let placed = event.state.block().id(host);
-    if placed == FARMER_HUT {
+    if is_hut(&placed) {
         queue(Pending {
             dimension: host.dimension().to_owned(),
             pos: [event.pos.x, event.pos.y, event.pos.z],
-            owner: None,
+            kind: PendingKind::Building { block: placed },
             misses: 0,
         });
         return Flow::Continue;
@@ -401,23 +434,39 @@ pub(crate) fn on_entity_place(
     queue(Pending {
         dimension: host.dimension().to_owned(),
         pos,
-        owner: Some((uuid, owner, colony_name)),
+        kind: PendingKind::Founding {
+            player: uuid,
+            owner,
+            name: colony_name,
+        },
         misses: 0,
     });
     Flow::Continue
 }
 
-/// Stores a completed placement: the colony in a fresh town hall, the marker in a farmer's hut.
+/// Stores a completed placement: the colony in a fresh town hall, the marker in a hut.
 fn complete(host: &mut dyn ServerHost, level: LevelRef, item: Pending) {
-    let Some(block) = level.block(host, item.pos) else {
+    let Pending { pos, kind, .. } = item;
+    let Some(block) = level.block(host, pos) else {
         return;
     };
     let placed = block.id(host);
-    let Some((uuid, owner, colony_name)) = item.owner else {
-        if placed == FARMER_HUT {
-            let _ = HUT.set(host.attachments(), Holder::BlockEntity(item.pos), HutMarker);
+    let (uuid, owner, colony_name) = match kind {
+        PendingKind::Building { block } => {
+            if placed == block {
+                let _ = HUT.set(
+                    host.attachments(),
+                    Holder::BlockEntity(pos),
+                    HutMarker { building: block },
+                );
+            }
+            return;
         }
-        return;
+        PendingKind::Founding {
+            player,
+            owner,
+            name,
+        } => (player, owner, name),
     };
     if placed != TOWN_HALL {
         return;
@@ -426,14 +475,14 @@ fn complete(host: &mut dyn ServerHost, level: LevelRef, item: Pending) {
     let Ok(founding) = founding_refusal(
         &colony_name,
         Some(&owner),
-        Pos::new(item.pos[0], item.pos[1], item.pos[2]),
+        Pos::new(pos[0], pos[1], pos[2]),
         &halls(host),
     ) else {
         return;
     };
     let now = level.game_time(host).unwrap_or(0);
     let colony = Colony::founded(founding, now);
-    write_colony(host, item.pos, &colony);
+    write_colony(host, pos, &colony);
     let line = format!(
         "Colony {} founded: {} blocks around the town hall, owner {}.",
         colony.name,
@@ -443,6 +492,20 @@ fn complete(host: &mut dyn ServerHost, level: LevelRef, item: Pending) {
     if let Some(player) = host.player(uuid) {
         let _ = player.tell(host, Text::literal(line));
     }
+}
+
+/// A player broke a block (`Hooks::player_destroyed_block`): a hut's marker goes with it, so the
+/// colony never claims a building that is not standing. `job info` then reads "missing" and the
+/// job's tick stops, which is what a break has to mean.
+pub(crate) fn on_player_destroyed_block(
+    host: &mut dyn ServerHost,
+    event: &mod_api::PlayerDestroyedBlockEvent,
+) {
+    let broken = event.state.block().id(host);
+    if !is_hut(&broken) {
+        return;
+    }
+    let _ = HUT.remove(host.attachments(), Holder::BlockEntity(event.pos));
 }
 
 /// A level's tick ended on the server: completes the placements queued in that level, then
@@ -735,8 +798,10 @@ fn step_job(
         return;
     };
     // A job that needs its building does not work without it (upstream's `AbstractJob` has a
-    // building per job; only the farmer's hut exists in this slice).
-    if job.building().is_some() && !has_farmers_hut(host, colony) {
+    // building per job; every working job in this slice has its own hut block).
+    if let Some(building) = job.building()
+        && !has_building(host, colony, building)
+    {
         return;
     }
     let Some(now) = level.game_time(host) else {
@@ -1251,18 +1316,21 @@ fn info_of(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEv
         return;
     };
     let citizen = &colony.citizens[index];
-    let hut = has_farmers_hut(host, &colony);
+    let building = citizen
+        .job
+        .building()
+        .is_some_and(|building| has_building(host, &colony, building));
     feedback(
         host,
         format!(
-            "{}: job {}, colony {} ({} crops harvested), {} logs felled, {} blocks mined, farmer's hut {}.",
+            "{}: job {}, colony {} ({} crops harvested), {} logs felled, {} blocks mined, {}.",
             citizen.name,
             citizen.job.label(),
             colony.name,
             colony.harvested,
             colony.felled,
             colony.dug,
-            if hut { "present" } else { "missing" }
+            crate::runtime::building_status(citizen.job, building)
         ),
     );
 }
@@ -1288,11 +1356,16 @@ fn assign(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEve
         );
         return;
     };
-    if job == Job::Farmer && !has_farmers_hut(host, &colony) {
+    if let Some(building) = job.building()
+        && !has_building(host, &colony, building)
+    {
+        let label = job.building_label().unwrap_or("its building");
         feedback(
             host,
-            "A farmer needs a farmer's hut in the colony: place minecolonies:blockhutfarmer."
-                .to_owned(),
+            format!(
+                "A {} needs {label} in the colony: place {building}.",
+                job.label().to_lowercase()
+            ),
         );
         return;
     }
@@ -1400,5 +1473,20 @@ mod tests {
         assert_eq!(uuid_value(&uuid_text(uuid)), Some(uuid));
         assert_eq!(uuid_value("not-a-uuid"), None);
         assert_eq!(uuid_value("0123456789abcdef"), None);
+    }
+
+    #[test]
+    fn a_hut_marker_saves_which_building_it_is() {
+        // The marker is what `job info` reads and what a break removes; the building it names is
+        // the whole point, so the saved form has to carry it byte for byte.
+        let marker = HutMarker {
+            building: LUMBERJACK_HUT.to_owned(),
+        };
+        let saved = encode_hut(&marker).expect("a marker encodes");
+        assert_eq!(text_of(&saved, "Building").as_deref(), Some(LUMBERJACK_HUT));
+        assert_eq!(decode_hut(&saved), Ok(marker));
+        // A marker written without its building is not a hut this port can answer for: 0.2.4's
+        // empty compound must not read as any building.
+        assert_eq!(decode_hut(&Compound::new()), Err(AttachmentError::Decode));
     }
 }

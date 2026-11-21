@@ -1,4 +1,5 @@
-# MineColonies — slices 1–2: town hall → colony → citizens → farmer, lumberjack, miner
+# MineColonies — slices 1–3: town hall → colony → citizens → farmer, lumberjack, miner, and
+the two jobs' buildings
 
 **Class:** `content` · **Tier:** `deep` · **Role:** core · **Priority:** P0 · in ATM10.
 Ported from **MineColonies** `1.1.1411-1.21.1-snapshot`, jar
@@ -7,7 +8,7 @@ Ported from **MineColonies** `1.1.1411-1.21.1-snapshot`, jar
 upstream `ldtteam/minecolonies` branch `version/main`, commit
 `3438c06fc92947b28bbd2fda29f00e207b967a22`.
 
-**Format (2026-11-18):** the flat **SDK package** (mod API `0.2`), version **0.2.4** — one
+**Format (2026-11-18):** the flat **SDK package** (mod API `0.2`), version **0.2.5** — one
 `.hmod` carrying `horizon-mod.toml`, `src/`, `assets/`, `data/` and the licence files. Pin:
 Horizon **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** (Nightly 2026-11-20), horizon-mixins
 **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`**, SDK surface `e0563779…`, package format 6.
@@ -30,8 +31,11 @@ The retired `.hnmod` (0.1.1, submission **#951**) is archived under
   — every texture and model is produced by `tools/gen_assets.py` from the palette below, and the
   lang file is written from scratch. The owner's ruling (ARCHITECTURE §8, 2026-11-12) is what makes
   this port possible: mechanics ported, art regenerated. `python3 tools/gen_assets.py --check`
-  still re-renders all 15 asset files **byte-identically** after the move from `content/assets/`
-  to `assets/` (the palette and the stored-deflate PNG writer are unchanged).
+  re-renders all **25** asset files **byte-identically**, and
+  `python3 ports/tools/check-provenance`-style measurement says **0 jar-derived bytes**: the
+  sha256 of every one of the 25 files under `assets/` is compared against the sha256 of all 22,747
+  entries of the jar (`ports/_shared/evidence/minecolonies/sdk-provenance.log`; the command is in
+  §"Verification").
 
 ## The slice
 
@@ -121,6 +125,98 @@ the same tree / column, which stays whole), and the miner's depth is inverted by
 rule is proved **both ways** in one run: tree 1 with a sapling in the chest is replanted, tree 2
 without one is left bare.
 
+### Slice 3 — the two jobs' buildings: `blockhutlumberjack` and `blockhutminer` (0.2.4 → 0.2.5)
+
+The gap line this slice closes (`## Gaps`, as it stood before it):
+
+> … the **buildings the new jobs would need** (a lumberjack's hut, a mine): the jobs themselves are
+> ported and asserted, the two blocks are not (see the deviations).
+
+Chosen because it is the deviation 0.2.4 itself named, it is **content + one rule** rather than a
+new mechanic, and it is provable in the harness through the command that already reports a
+building: `job info`. It fits `deep` without growing the port's shape — two more blocks, two more
+declared block-entity types, and one more `Hooks` method (`player_destroyed_block`).
+
+Required behaviour, from upstream's own data and its job classes (implemented, not copied):
+
+| Rule | Source |
+|---|---|
+| The two blocks are `minecolonies:blockhutlumberjack` and `minecolonies:blockhutminer`; upstream's lang names them *Forester's Hut* and *Mine* | `assets/minecolonies/lang/en_us.json`: `block.minecolonies.blockhutlumberjack`, `block.minecolonies.blockhutminer` (the port's `lang/en_us.json` uses the same two names) |
+| Every job has a building (`JobLumberjack`/`BuildingLumberjack`, `JobMiner`/`BuildingMiner`, `JobFarmer`/`BuildingFarmer`) and a job without its building does nothing | `AbstractJob`/`AbstractBuilding`; the same rule the farmer already had |
+| Both hut recipes are planks around the scepter with the trade's tool in the middle: `XTX/XBX/XXX` (`T` = `structurize:sceptergold`, `B` = `wooden_axe` / `wooden_pickaxe`) | `data/minecolonies/recipe/blockhutlumberjack.json`, `blockhutminer.json` |
+| A hut block is a colony block: hardness 10, blast resistance infinite, wood sound, no occlusion | `AbstractColonyBlock.java:70,75,99` (the same declaration the town hall and the farmer's hut already carry) |
+
+**TDD, in the order the ruling asks for.** The rules live in `runtime.rs` (pure), so the failing
+tests came first — the two new rules as `panic!()` bodies plus the generalised `building()`:
+
+```
+$ cargo test --offline
+---- runtime::tests::every_working_job_names_the_building_its_rule_needs stdout ----
+thread 'runtime::tests::every_working_job_names_the_building_its_rule_needs' panicked at src/runtime.rs:309:9:
+a job's building
+---- runtime::tests::job_info_names_each_building_the_way_the_command_says_it stdout ----
+thread 'runtime::tests::job_info_names_each_building_the_way_the_command_says_it' panicked at src/runtime.rs:340:5:
+not implemented: a job's building status
+...
+test result: FAILED. 54 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+(`ports/_shared/evidence/minecolonies/sdk-test-slice3-red.log`; the four are the two new rules,
+`the_new_jobs_round_trip_through_their_ids` (the old expectation was `Lumberjack.building() == None`)
+and `the_huts_are_the_three_blocks_the_port_carries`.) Then the rules, the glue and the content;
+`sdk-test.log` is the green run: **59 tests**.
+
+**What changed in the rules**: `Job::building()` answers each working job's own block
+(`LUMBERJACK_HUT`, `MINER_HUT` join `FARMER_HUT`), `Job::building_label()` names it the way the
+command says it ("lumberjack's hut", "mine"), `building_status(job, present)` produces
+`"lumberjack's hut present"` / `"… missing"` / `"no building"` for the unemployed, and `is_hut(id)`
+reads the one `HUTS` list the registration, the marker and the break handler share.
+
+**What changed in the glue**: the hut marker became **one** attachment type (`minecolonies:hut`)
+whose value is *which building* it is, so `has_building(colony, job.building())` is one query for
+every job rather than a farmer special case; `register` declares three block-entity types from
+`HUTS`; the placement queue's "what does this placement become" became an enum
+(`Founding`/`Building`) rather than an `owner: Option<…>`; and **`Hooks::player_destroyed_block`**
+removes a broken hut's marker, so the building is gone when the block is.
+
+**The harness's assertions** (`tools/e2e.sh` L1–L3 and M1, at `0a875da`):
+
+```
+== L1: the lumberjack's hut is its building: without it the assignment is refused ==
+  without its hut: A lumberjack needs lumberjack's hut in the colony: place minecolonies:blockhutlumberjack.
+== L2: the hut is placed, job info reads it, and the tree falls ==
+  Bo: job Lumberjack, colony Riverside (3 crops harvested), 0 logs felled, 0 blocks mined, lumberjack's hut present.
+  after the fell: soil at 2004,101,-1 is 'minecraft:dirt', stump is 'minecraft:oak_sapling',
+    chest [{"count":4,"item":"minecraft:oak_log"}]
+== L3: breaking the hut takes the building with it ==
+  the break dropped {"minecolonies:blockhutlumberjack":1}
+  after the break: Bo: job Lumberjack, …, lumberjack's hut missing.
+== M1: the mine is the miner's building ==
+  Cass: job Miner, colony Riverside (…), mine present.
+```
+
+and the brief's own case: with the hut absent a citizen assigned `lumberjack` beside a whole
+four-log tree leaves it **whole for 200 ticks** (L1's counterfactual, after the refusal), and with
+the hut placed the same tree reads 4 × air with 4 `oak_log` in the chest (L2). The break is made
+**in survival with an iron axe** (`gamemode survival` for the one action): a creative break drops
+nothing in vanilla, so a creative test could never run the hut's own loot table — this one asserts
+the drop, `{"minecolonies:blockhutlumberjack":1}`, and then goes back to creative. The break is
+fail-capable on its own: `HUT_SELFTEST=1` inverts L3 (a broken hut must still read "present") and
+fails `the broken hut reads missing, so the marker went with the block` — a port whose marker
+outlived its block passes that leg and fails the normal one
+(`../_shared/evidence/minecolonies-e2e/e2e-hut-selftest.log`).
+
+Both new recipes are crafted in a real table with their ingredients consumed
+(`tools/craft_check.py`, phase N):
+
+```
+  lumberjack's hut: planks around a crafting table and a wooden axe ->
+    {"count": 1, "item": "minecolonies:blockhutlumberjack", "slot": 200}
+  mine: planks around a crafting table and a wooden pickaxe ->
+    {"count": 1, "item": "minecolonies:blockhutminer", "slot": 200}
+  lumberjack's hut with a stick where the axe goes -> null
+```
+
 ### Behaviour, and where it was read
 
 | Rule | Source |
@@ -132,7 +228,7 @@ without one is left bare.
 | Rename field: **25** characters, an empty name is not applied | `windowtownhallnameentry.xml`; `WindowTownHallNameEntry.java:45-50` |
 | Hut blocks: hardness 10, blast resistance infinite, wood sound, no occlusion | `AbstractColonyBlock.java:70,75,99` |
 | Farmer: one work step per **40** ticks at skill 0, harvests a mature crop (`CropBlock.isMaxAge`) | `EntityAIWorkFarmer.java:85,661-676,692,797` |
-| A job needs its building (a farmer needs the farmer's hut) | `JobFarmer`/`BuildingFarmer`, `ModBuildings` |
+| A job needs its building (a farmer the farmer's hut, a lumberjack the lumberjack's hut, a miner the mine) | `JobFarmer`/`BuildingFarmer`, `JobLumberjack`/`BuildingLumberjack`, `JobMiner`/`BuildingMiner`, `ModBuildings` |
 | Citizen base health 20; full saturation 60; the entity carries its colony id and a custom name | `CitizenConstants.java:84`; `ICitizenData.java:30`; `CitizenData.java:552-560` |
 | One colony per player | `CreateColonyMessage.java:172-183` |
 | Command roots `minecolonies` (alias `mc`), subcommands `colony` and `citizens` | `EntryPoint.java:86-132` |
@@ -151,13 +247,19 @@ Palette — one named colour per family, nothing else:
 | `farmer_timber` | `#8b6d3f` | farmer's hut texture, walls |
 | `farmer_roof` | `#6b8f3a` | farmer's hut texture, top three rows |
 | `farmer_door` | `#4a331e` | farmer's hut texture, door |
+| `lumberjack_timber` | `#6e5433` | lumberjack's hut texture, walls |
+| `lumberjack_roof` | `#3f6b2a` | lumberjack's hut texture, top three rows |
+| `lumberjack_door` | `#2f2413` | lumberjack's hut texture, door |
+| `miner_stone` | `#6b6f77` | mine texture, the stone face |
+| `miner_timber` | `#4a3826` | mine texture, the head-frame beams |
+| `miner_lamp` | `#e3c05a` | mine texture, the lamp |
 | `scythe_blade` | `#c8d2da` | scythe sprite, blade |
 | `scythe_handle` | `#7a522e` | scythe sprite, shaft |
 | `citizen_skin` | `#d9a47a` | citizen texture, upper half |
 | `citizen_shirt` | `#3f6f8f` | citizen texture, lower half |
 
 Model templates (every model JSON is one of the three): `cube` (`minecraft:block/cube_all`) for the
-town hall, `slab` (one box `[0,0,0]..[16,8,16]`) for the farmer's hut, `cross`
+town hall, `slab` (one box `[0,0,0]..[16,8,16]`) for the three huts, `cross`
 (`minecraft:block/cross`) for the scythe. `tools/assemble_content.py` writes the declarations
 (`horizon/block`, `horizon/item`, `horizon/entity_type`, recipes, loot, tags, the creative tab) and
 its `--check` proves `data/` is exactly what it would write.
@@ -183,6 +285,8 @@ renderer: the citizen draws with its villager template's model (a gap, below).
   write goes through that level's attachment store).
 - **Entity tick**: `EntityPart::general_entity_tick` on `minecolonies:citizen` (`src/parts.rs`) —
   the citizen's job is one entity type's moment, not a global hook.
+- **A broken hut**: `Hooks::player_destroyed_block` (a player's break, after the removal) drops the
+  `HUT` marker at that position, so a colony never claims a building that is not standing.
 - **Commands**: `Hooks::register_commands` pushes `Command::new("<usage>")` usages;
   `Hooks::run_mod_command` receives the **parsed** invocation (literals + typed arguments) instead
   of a raw line.
@@ -226,9 +330,10 @@ migrated on 2026-11-18 from pin `9f42064` to `0b14f8a`; the old bundle is archiv
 | `support.rs` (`[[module]]`) | game glue, state, commands | `src/support.rs` | **kept**, rewritten |
 | `runtime.rs` (`[[module]]`) | the pure colony rules | `src/runtime.rs` | **kept byte-identical** |
 
-The five `Hooks` methods plus the one `EntityPart` method are the whole mod surface;
+The six `Hooks` methods plus the one `EntityPart` method are the whole mod surface;
 `uses.json` inside the package lists them (`hook:entity_place`, `hook:general_entity_tick`,
-`hook:register_commands`, `hook:run_mod_command`, `hook:level_tick_post`, `macro:horizon_part`), which
+`hook:player_destroyed_block`, `hook:register_commands`, `hook:run_mod_command`,
+`hook:level_tick_post`, `macro:horizon_part`), which
 is the machine-checkable half of this table.
 
 ### Manifest mapping
@@ -315,12 +420,12 @@ cargo output.
   where upstream reads a farm field's crop list; the observable behaviour (walk, harvest, replant)
   is the same at this depth.
 - Art placeholders: the farmer's hut is a half-height box and the scythe two crossed planes.
-- **New in 0.2.2 (slice 2):** the two new jobs need **no building**. Upstream gives every job a
-  building (`JobLumberjack`/`BuildingLumberjack`, `JobMiner`/`BuildingMiner`), but this port has no
-  lumberjack's hut or mine block — only the farmer's hut exists — so `Job::building()` answers
-  `Some(FARMER_HUT)` for the farmer alone and the two new jobs are assignable without one. The
-  rule (and its code path) is in place for when those blocks arrive; adding them is content, not
-  behaviour, and their `blueprints/**` are jar art this port may not carry.
+- ~~**New in 0.2.2 (slice 2):** the two new jobs need **no building**~~ — **closed in 0.2.5**: the
+  port now carries `blockhutlumberjack` and `blockhutminer`, `Job::building()` answers each working
+  job's own block, and an assignment without it is refused (upstream's own rule). The buildings'
+  `blueprints/**` remain jar art this port may not carry, so the huts are **blocks without
+  schematics**: the building is the rule's token, and the builder (which would raise the schematic
+  from it) is still a gap.
 - **New in 0.2.2 (slice 2):** a citizen has no inventory of its own, so the **colony's chest is its
   store**: the nearest `minecraft:chest` inside the colony within 16 blocks of the worker is where
   a lumberjack's logs and a miner's cobblestone go, and where the sapling a felled tree is
@@ -363,11 +468,12 @@ same 128-block threshold; the e2e proves it — the raised town hall at 120 acro
 refused, which upstream's formula would allow. Worth an upstream report? Yes, a one-line change
 (`getDistanceSquared2D`), but not filed: the brief asks only to say whether it is worth one.
 
-**Data that could never match**: the town hall recipe names `structurize:sceptergold`. Structurize
-is MineColonies' parent mod and is not ported here, so the recipe could never match at this pin
-(the same rule as `sushigocrafting`'s knife tag). The port's recipes keep the shapes and use
-vanilla ingredients (planks + a crafting table; planks + an iron hoe; iron ingots + sticks), which
-is recorded here rather than shipped broken.
+**Data that could never match**: the town hall recipe names `structurize:sceptergold`, and so do
+the two huts' recipes (`PCP`'s `C` slot). Structurize is MineColonies' parent mod and is not ported
+here, so the recipe could never match at this pin (the same rule as `sushigocrafting`'s knife tag).
+The port's recipes keep the shapes and use vanilla ingredients (planks + a crafting table; planks +
+an iron hoe; planks + a crafting table + a wooden axe / wooden pickaxe; iron ingots + sticks),
+which is recorded here rather than shipped broken.
 
 ## Carried data fixed (2026-11-21, the `constructionstick` class)
 
@@ -395,12 +501,16 @@ The table is the record the parity rule asks for: a family is `tested` in game t
 |---|---|---|
 | `minecolonies:blockhuttownhall` | tested | A: placed from the held item, founds the colony, `colony info` reads it back; C–E: refused placements leave air; the block and its item share the id |
 | `minecolonies:blockhutfarmer` | tested | F: placed; H: `job info` reports it as the farmer's building; the block and its item share the id |
+| `minecolonies:blockhutlumberjack` | tested | L1: with none in the colony the lumberjack assignment is refused by name and the tree stays whole; L2: placed, `job info` reads "lumberjack's hut present" and the tree falls; L3: broken, the block is air and the same command reads "missing"; N: its recipe crafts it |
+| `minecolonies:blockhutminer` | tested | M1: placed, `job info` reads "mine present" before the miner is assigned and works; N: its recipe crafts it |
 | `minecolonies:blocks/blockhuttownhall` | tested | A: the block's own loot table (the declared shape; the block has no `requires_tool`, so a hand break drops it) |
 | `minecolonies:blocks/blockhutfarmer` | tested | F: same declared shape, same tag (`minecraft:mineable/axe`, carried by `data/minecraft/tags/block/mineable/axe.json`) |
+| `minecolonies:blocks/blockhutlumberjack` | tested | L3: a player's break removes it and drops it — the same declared shape and the same axe tag |
+| `minecolonies:blocks/blockhutminer` | tested | M1: placed and read back; same declared shape, same axe tag |
 | `minecolonies:entities/citizen` | tested | G/M: hired, counted live, and the roster is read back; the citizen entity type is what the hire spawns |
 | `minecolonies:scythe` | tested | N: crafted in a real table, read back from the inventory; the recipe is the same id |
-| `block_entity` | tested | A/B/K: the town hall's block entity holds the colony attachment, which round-trips and survives a relaunch; F/H: the farmer's hut's marker is found by `has_farmers_hut`. Both types are declared in code (`Registrar::block_entity_type`), not in `data/`, which is why the tool sees no id for them |
-| `*` | not ported | everything else the jar carries: the other ~92 blocks and ~236 items, the other ~35 jobs, the research tree (`data:researches`), crafter recipes, colony/visitor/name data, the other 150 loot tables, the recipes the port does not carry, the item/block/entity tags, and the world-gen families (`worldgen:structure`, `worldgen:structure_set`, `worldgen:template_pool`, `worldgen:processor_list`, `tag:worldgen`). The builder's `blueprints/**` are jar **art** and may not be carried at all (`blocked(jar-assets)`). The gap list below is the prose form of this row. |
+| `block_entity` | tested | A/B/K: the town hall's block entity holds the colony attachment, which round-trips and survives a relaunch; F/H, L2, M1: each hut's marker is found by `has_building` and lost on the break (L3). All four types are declared in code (`Registrar::block_entity_type`), not in `data/`, which is why the tool sees no id for them |
+| `*` | not ported | everything else the jar carries: the other ~90 blocks and ~234 items, the other ~35 jobs, the research tree (`data:researches`), crafter recipes, colony/visitor/name data, the other ~148 loot tables, the recipes the port does not carry, the item/block/entity tags, and the world-gen families (`worldgen:structure`, `worldgen:structure_set`, `worldgen:template_pool`, `worldgen:processor_list`, `tag:worldgen`). The builder's `blueprints/**` are jar **art** and may not be carried at all (`blocked(jar-assets)`). The gap list below is the prose form of this row. |
 
 The commands (`colony info/rename/radius`, `citizen hire/list`, `job assign/info`) are not a family
 the tool inventories; every one of them is called and its **parsed** reply asserted in the leg
@@ -416,9 +526,10 @@ Content and behaviour, unchanged from 0.1.1:
   buildings, worldgen colonies, and the colony registry across unloaded chunks.
 - The citizen's own model and texture (a native renderer slice); the scythe is a plain item with no
   harvest behaviour of its own (the job does the harvesting).
-- The colony banner, the supply camp/ship, every other block of the mod, and the **buildings the new
-  jobs would need** (a lumberjack's hut, a mine): the jobs themselves are ported and asserted, the
-  two blocks are not (see the deviations).
+- The colony banner, the supply camp/ship, and every other block of the mod. The **buildings the
+  three jobs need** are carried (`blockhutfarmer`, `blockhutlumberjack`, `blockhutminer`) and their
+  rule is asserted both ways; what is still missing is the **builder and the buildings' level /
+  schematic model** — a hut here is a block and a job's token, not a multi-level building.
 
 Introduced or left open by the migration — **closed at 0.2.4 (2026-11-21)**: the game binary at
 the campaign pin now exists and the leg ran, so the attachment **codec persistence across a
@@ -426,8 +537,11 @@ relaunch** (K), the **block entity holder** for a content-declared block (A/B), 
 driving the roster (G–M) and the launcher compiling `src/` from the package directory (every
 launch) are all transcripts, not compile-level claims. What remains open:
 
-- A hut placed **before** this port's attachments existed is invisible to
-  `has_farmers_hut` until re-placed (no migration from 0.1.1 worlds; the formats differ anyway).
+- A hut placed **before** this port's attachments existed is invisible to `has_building` until
+  re-placed (no migration from 0.1.1 worlds; the formats differ anyway). **0.2.5 changes the marker
+  itself**: it was `minecolonies:farmer_hut` with an empty value and is now `minecolonies:hut` whose
+  value names the building, so a hut placed by 0.2.4 or earlier needs re-placing once — a
+  deliberate break, because "a hut" could not say *which* building it was.
 - The villager-fallback citizen does not farm (above).
 - `python3 ports/tools/upstream_ready.py minecolonies --copyleft` reports the pin blocker when the
   tool's hardcoded campaign pin differs from the port's: the SDK nightly is a campaign-level ruling,
@@ -456,66 +570,98 @@ a second build is byte-identical (`cmp`), `check` and `fits` exit 0.
 
 ## Verification
 
-Skills: superpowers/using-superpowers,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
 
-At **0.2.4 / `0a875da`** (2026-11-21), the logs under `ports/_shared/evidence/minecolonies/` and
-`ports/_shared/evidence/minecolonies-e2e/`. Every ladder log prints the sha256 of the delivered
-package it was run against.
+At **0.2.5 / `0a875da`** (2026-11-21), the logs under `ports/_shared/evidence/minecolonies/` and
+`ports/_shared/evidence/minecolonies-e2e/`. `check` and `fits` print the sha256 of the delivered
+package they were run against; `sdk-build*.log` and `sdk-sha256.log` are the package's own.
 
 | step | command | result | log |
 |---|---|---|---|
-| repin | `cargo horizon-mod update --horizon 0a875da…` | *"MineColonies, from 0b14f8a to 0a875da: none of the 287 items it uses changed."* then *"Pinned to Horizon 0a875da…"*; `.horizon/sdk` refetched (`SDK 0a875da (build 0a875da…)`) | — |
-| runtime tests (red) | `cargo test --offline` with the new rules as `unimplemented!()` | **41 passed, 14 failed**, `not implemented: the tree's connected cluster` / `the miner's shaft` / `the lumberjack's step` | `sdk-test-slice2-red.log` |
-| runtime tests | `cargo test --offline --locked` | **55 passed**, 0 failed | `sdk-test.log` |
-| lints | `cargo clippy --offline --locked --all-targets -- -D warnings` | exit 0, **0 warnings**, `CLIPPY_EXIT:0` | `sdk-clippy.log` |
+| runtime tests (red) | `cargo test --offline`, the new rules as `panic!()` bodies | **54 passed, 4 failed**, `a job's building` / `not implemented: a job's building status` / `not implemented: the hut blocks` | `sdk-test-slice3-red.log` |
+| runtime tests | `cargo test --offline --locked` | **59 passed**, 0 failed, `TEST_EXIT:0` | `sdk-test.log` |
+| lints | `cargo clippy --offline --all-targets -- -D warnings` | exit 0, **0 warnings**, `CLIPPY_EXIT:0` | `sdk-clippy.log` |
 | format | `cargo fmt --check` | `FMT_EXIT:0` | `sdk-fmt.log` |
-| package, twice | `rm -f Cargo.lock && cargo horizon-mod build` ×2 | **`CMP:identical`**, 63,940 B, sha256 **`d81dcd77b30d37f2c0291ee2b4ee736e03848754d04661f31dc7493960dac0aa`** | `sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.log` |
-| registry check | `cargo horizon-mod check <delivered file>` | `minecolonies 0.2.4 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 63,940 B, SHA-256 `d81dcd77…ac0aa` | `sdk-check.log` |
-| compile the package's source | `cargo horizon-mod check --uses <delivered file>` | exit 0 (the wasm pass; its unused-item notes are the native-only Parts) | `sdk-check-uses.log` |
-| fits the pin | `cargo horizon-mod fits <delivered file> --build 0a875da` | `0a875da  made for` | `sdk-fits.log` |
-| fits another build | `cargo horizon-mod fits <delivered file> --build 0b14f8a` | `0b14f8a  fits` | `sdk-fits-other.log` |
-| content | `python3 tools/gen_assets.py --check`, `python3 tools/assemble_content.py --check` | `assets/minecolonies/: 15 files, byte-identical to the palette's output`; `data/` matches the assembler | `sdk-assets.log` |
-| package contents | `unzip -l` | **37 entries**; `LICENSE` (GPL-3.0 text) and `LICENSE-NOTICE.md` inside; **no `Cargo.lock`** | `sdk-entries.txt` |
+| package, twice | `rm -f Cargo.lock && cargo horizon-mod build` ×2, `cmp` | **`CMP:identical`**, **71,966 B**, sha256 **`9fbb989826e8b472ef026467286fc2af9b84b5b7134424a40e8235ba5043a635`** | `sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.log` |
+| registry check | `cargo horizon-mod check minecolonies.hmod` (the delivered file) | `minecolonies 0.2.5 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`; `71,966 bytes, SHA-256 9fbb9898…3a635`, `CHECK_EXIT:0` — run against sha `9fbb9898…` | `sdk-check.log` |
+| compile the package's source | `cargo horizon-mod check --uses minecolonies.hmod` | `USES_EXIT:0` (compiles for wasm as well; the unused-item notes are the native-only Parts) | `sdk-check-uses.log` |
+| fits the pin | `cargo horizon-mod fits minecolonies.hmod --build 0a875da` | `0a875da  made for`, `FITS_EXIT:0` — run against sha `9fbb9898…` | `sdk-fits.log` |
+| fits another build | `cargo horizon-mod fits minecolonies.hmod --build 0b14f8a` | `0b14f8a  fits`, `FITS_OTHER_EXIT:0` — run against sha `9fbb9898…` | `sdk-fits-other.log` |
+| content | `python3 tools/gen_assets.py --check`, `python3 tools/assemble_content.py --check` | `assets/minecolonies/: 25 files, byte-identical to the palette's output`; `data/` matches the assembler; `GEN_EXIT:0`, `ASSEMBLE_EXIT:0` | `sdk-assets.log` |
+| **no jar-derived asset** | every file under `assets/` hashed against every jar entry | `tree: 25 files … 14006 bytes` / `jar-derived asset bytes: 0 (files matched: 0)` — 22,747 jar entries, 20,465 distinct hashes | `sdk-provenance.log` |
+| package contents | `unzip -l minecolonies.hmod` | **53 files**; `LICENSE` (GPL-3.0 text) and `LICENSE-NOTICE.md` inside; **no `Cargo.lock`** | `sdk-entries.txt` |
 | gate | `python3 ports/tools/verify-sdk-package.py minecolonies` | **1/1 package(s) verified** | — |
-| game build | `ports/tools/launcher-game.sh build minecolonies` | `Compiling minecolonies (1 of 1)` (the manifest's version moved, so the launcher could not reuse a build) | — |
-| in game | `build-slot.sh run … --step e2e -- tools/e2e.sh` | **PASS** + `EXIT:0`, phases A–N | `minecolonies-e2e/e2e-launcher.log` |
-| control (the unmodded Nightly) | `GAME=$CONTROL_GAME tools/e2e.sh` | **FAIL** at `Unknown item 'minecolonies:blockhuttownhall'`, `EXIT:1` | `minecolonies-e2e/e2e-launcher-control.log` |
-| control inside the same run | `CONTROL=1 tools/e2e.sh` | the control leg says *"without the package: no town hall item"*, then the modded leg is **PASS** + `EXIT:0` | `minecolonies-e2e/e2e-launcher-control-inside.log` |
-| fail-capability (depth) | `SELFTEST=1 tools/e2e.sh` | **FAIL** `the miner did not dig 9 blocks above the bedrock`, `EXIT:1` | `minecolonies-e2e/e2e-selftest.log` |
-| fail-capability (founding) | `FOUNDING_SELFTEST=1 tools/e2e.sh` | **FAIL** `selftest: the second town hall was refused, as it should be`, `EXIT:1` | `minecolonies-e2e/e2e-founding-selftest.log` |
-| log gate | `python3 ports/tools/check-e2e-logs.py minecolonies-e2e --strict` | `logs=5 ok=5 missing-exit=0 bad-exit=0`, exit 0 | — |
-| coverage | `python3 ports/tools/check-coverage.py minecolonies` | every carried family `tested` or declared `not ported`/`blocked(...)` | — |
+| game build | `ports/tools/launcher-game.sh build minecolonies` | `Compiling minecolonies (1 of 1)` (the manifest's version moved to 0.2.5, so the launcher could not reuse the 0.2.4 build) | — |
+| in game | `build-slot.sh run … --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0`, phases A–N | `minecolonies-e2e/e2e-launcher.log` |
+| control (the unmodded Nightly) | `GAME=$CONTROL_GAME … tools/e2e.sh` | **FAIL** at `ctl place of minecolonies:blockhuttownhall … failed` / `Unknown item 'minecolonies:blockhuttownhall'`, `EXIT:1` | `minecolonies-e2e/e2e-launcher-control.log` |
+| control inside the same run | `CONTROL=1 … tools/e2e.sh` | the control leg says *"without the package: no town hall item"*, then the modded leg is **PASS** + `EXIT:0` | `minecolonies-e2e/e2e-launcher-control-inside.log` |
+| fail-capability (depth) | `SELFTEST=1 … tools/e2e.sh` | **FAIL** `the miner did not dig 9 blocks above the bedrock`, `EXIT:1` | `minecolonies-e2e/e2e-selftest.log` |
+| fail-capability (the break) | `HUT_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the broken hut reads missing, so the marker went with the block`, `EXIT:1` | `minecolonies-e2e/e2e-hut-selftest.log` |
+| fail-capability (founding) | `FOUNDING_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the second town hall was refused, as it should be`, `EXIT:1` | `minecolonies-e2e/e2e-founding-selftest.log` |
+| log gate | `python3 ports/tools/check-e2e-logs.py minecolonies-e2e --strict` | `logs=6 ok=6 missing-exit=0 bad-exit=0`, exit 0 | — |
+| coverage | `python3 ports/tools/check-coverage.py minecolonies` | `missing_families=0 … missing=0`, exit 0; the two new blocks are `tested` rows | — |
 
 **The in-game run at this pin, 2026-11-21** (`minecolonies-e2e/e2e-launcher.log`, the phases in
-order): A–E founding and both refusals (including 120 across × 200 up, the fixed defect), F/ G/ H
-the hut, the hire and the building rule, I the farmer harvests and walks, J a citizen with no
-colony is inert, K the colony survives quit + relaunch, L the two trees (a sapling replanted only
-when the chest held one, the leaves untouched, 4 then 8 logs in the chest, `0 → 4 → 8` logs
-felled), M the miner's 1×1 eight-block shaft to the bedrock (bedrock and the four neighbouring
-floor blocks untouched, 8 cobblestone in the chest, the dug counter 8), N the three recipes crafted
-in a real table with their controls, the scythe read back and an unknown id refused. Every
-assertion of L and M has its counterfactual in the same run (the citizen unemployed beside the same
-tree/column stays whole) and the depth inversion is the `SELFTEST=1` leg.
+order): A–E founding and both refusals (including 120 across × 200 up, the fixed defect), F/G/H the
+farmer's hut, the hire and the building rule (`no building` while unemployed, then `farmer's hut
+present`), I the farmer harvests and walks, J a citizen with no colony is inert, K the colony
+survives quit + relaunch, L the two trees with the **building rule**: the assignment is refused with
+no lumberjack's hut (and the tree stays whole), the hut is placed → `job info` reads "lumberjack's
+hut present" → the tree falls (a sapling replanted only when the chest held one, the leaves
+untouched, 4 then 8 logs in the chest) → the hut is **broken** → `job info` reads "lumberjack's hut
+missing" (L1–L3); M the miner's 1×1 eight-block shaft to the bedrock with the **mine** placed and
+`job info` reading "mine present" (M1), 8 cobblestone in the chest; N the **five** recipes crafted
+in a real table with their controls (the two huts included), the scythe read back and an unknown id
+refused. Every assertion of L and M has its counterfactual in the same run (the citizen unemployed
+beside the same tree/column stays whole), the depth inversion is the `SELFTEST=1` leg and the break
+inversion is the `HUT_SELFTEST=1` leg.
 
 `tools/e2e.sh` launches with **`--offscreen`** rather than `--headless`: phase N opens a crafting
-table's menu and clicks its slots, and a menu needs a screen.
+table's menu and clicks its slots, and a menu needs a screen. Its scratch home goes under
+`${E2E_TMP:-/tmp/opencode}` (the launcher's env block exports `E2E_TMP`, because `/tmp` is a 7.5 GB
+tmpfs).
 
-**Not carried, not claimed:** the two jobs' buildings (the deviations section), the builder's
-schematics, and everything in the gap list above. The e2e's citizen inventory is the colony's chest,
-stated as a deviation, not as upstream's own building rack.
+**Not carried, not claimed:** the builder's schematics and the huts' levels, and everything in the
+gap list above. The e2e's citizen inventory is the colony's chest, stated as a deviation, not as
+upstream's own building rack.
 
-History — the 0.2.1/0.2.0 evidence (`retired-0.2.1/`, moved when 0.2.4 superseded it):
+History — the 0.2.4 evidence stays in place, superseded by this run:
 
+- **0.2.4 / `0a875da`** (2026-11-21): 55 tests, `63,940 B` sha256 `d81dcd77…ac0aa`, `check` and
+  both `fits` exit 0, in-game `PASS` + `EXIT:0` with the control, `SELFTEST=1` and
+  `FOUNDING_SELFTEST=1` at `EXIT:1`; the two new jobs with **no building** (the deviation 0.2.5
+  closes).
+- **0.2.1 / `0b14f8a`** (2026-11-19): 39 tests after the registry review's three fixes, `54,038 B`
+  sha256 `5c46f90c…`, in-game `PASS` + `EXIT:0` with the control at `EXIT:1`. Its archive is
+  `retired-0.2.1/`.
 - **0.2.0 / `0b14f8a`** (2026-11-18): 36 tests, clippy 0, `53,767 B` sha256 `0d014f3f…`, `fits`
   `0b14f8a made for`; **no in-game run at that pin** (no game binary existed), recorded as a gap.
-- **0.2.1 / `0b14f8a`** (2026-11-19): 39 tests after the registry review's three fixes, `54,038 B`
-  sha256 `5c46f90c…`, in-game `PASS` + `EXIT:0` with the control at `EXIT:1`
-  (`minecolonies-e2e/e2e-launcher.log`, recorded then; superseded by this run).
 - **0.1.1 / `9f42064`**: the retired `.hnmod`; 36 runtime tests first (0 passed / 36 failed against
   `unimplemented!()`), the embedded-content leg with its control, and the 38,828 B bundle
   (`e2e-dev.log`, `e2e-embedded.log`, `e2e-nightly.log`, `e2e-selftest.log`).
 
 ## Changelog for the next version (verbatim)
+
+**0.2.5** — the third slice, the two jobs' buildings:
+
+- **`minecolonies:blockhutlumberjack`** (upstream's *Forester's Hut*) and
+  **`minecolonies:blockhutminer`** (upstream's *Mine*): two more hut blocks with their own
+  generated textures and slabs, recipes, loot tables and the axe tag, declared with the town hall's
+  block properties (hardness 10, blast resistance infinite, wood sound, no occlusion).
+- **A job needs its building, for every job.** `Job::building()` now answers the lumberjack's hut
+  and the mine as well as the farmer's hut; `job assign … lumberjack|miner` is **refused** by name
+  while the building is not standing inside the colony, and the job does not tick without it.
+- **Breaking a hut takes its building with it**: a new `player_destroyed_block` hook drops the
+  hut's marker, so `/minecolonies job info <citizen>` reads "lumberjack's hut missing" (previously
+  it only ever reported the farmer's hut, and never noticed a break). It reads "no building" for an
+  unemployed citizen.
+- **Both new recipes** craft in a real table (`PCP/PBP/PPP`: planks, a crafting table where
+  upstream's `structurize:sceptergold` goes, and the trade's wooden tool), asserted with their
+  ingredients consumed and a wrong-ingredient control; `tools/craft_check.py` now covers all five
+  carried recipes.
+- The in-game leg gained L1–L3 and M1: the same four-log tree is left whole with the hut absent and
+  reads 4 × air with 4 `oak_log` in the chest with it placed, and `HUT_SELFTEST=1` inverts the
+  break assertion so it can fail.
 
 **0.2.4** — the second slice, `lumberjack` and `miner`:
 

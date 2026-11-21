@@ -2,12 +2,12 @@
 # Ported from: MineColonies 1.1.1411-1.21.1-snapshot (ldtteam/minecolonies, GPL-3.0 code, art
 # All Rights Reserved and regenerated here, never copied), Minecraft Java 1.21.1 NeoForge.
 # Local-only until the maintainer approves publishing. Cargo's name/version are not the mod's
-# identity: `horizon-mod.toml` is (id `minecolonies`, version 0.2.4).
+# identity: `horizon-mod.toml` is (id `minecolonies`, version 0.2.5).
 name = "mod-minecolonies"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 license = "GPL-3.0-only"
-description = "MineColonies for Horizon: a town hall founds a colony and one citizen farms"
+description = "MineColonies for Horizon: a town hall founds a colony, its citizens farm, fell trees and mine, each in its own hut"
 publish = false
 
 [dependencies]

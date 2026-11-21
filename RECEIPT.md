@@ -1,11 +1,11 @@
-# Package receipt — minecolonies 0.2.4
+# Package receipt — minecolonies 0.2.5
 
 | field | value |
 |---|---|
-| version | `0.2.4` |
+| version | `0.2.5` |
 | file | `minecolonies.hmod` |
-| bytes | 63,940 |
-| sha256 | `d81dcd77b30d37f2c0291ee2b4ee736e03848754d04661f31dc7493960dac0aa` |
+| bytes | 71,966 |
+| sha256 | `9fbb989826e8b472ef026467286fc2af9b84b5b7134424a40e8235ba5043a635` |
 | source | this tag — the tree here is the source that produced the archive |
 | game | 26.3 |
 | horizon | `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` |

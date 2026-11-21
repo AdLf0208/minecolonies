@@ -1,0 +1,18 @@
+{
+  "category": "misc",
+  "key": {
+    "B": "minecraft:wooden_axe",
+    "C": "minecraft:crafting_table",
+    "P": "#minecraft:planks"
+  },
+  "pattern": [
+    "PCP",
+    "PBP",
+    "PPP"
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecolonies:blockhutlumberjack"
+  },
+  "type": "minecraft:crafting_shaped"
+}

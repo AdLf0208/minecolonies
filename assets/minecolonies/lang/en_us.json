@@ -1,5 +1,7 @@
 {
   "block.minecolonies.blockhutfarmer": "Farmer's Hut",
+  "block.minecolonies.blockhutlumberjack": "Forester's Hut",
+  "block.minecolonies.blockhutminer": "Mine",
   "block.minecolonies.blockhuttownhall": "Town Hall",
   "entity.minecolonies.citizen": "Citizen",
   "item.minecolonies.scythe": "Scythe",

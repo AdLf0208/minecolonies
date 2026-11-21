@@ -40,12 +40,16 @@ RESULT = 200
 
 TOWN_HALL = "minecolonies:blockhuttownhall"
 FARMER_HUT = "minecolonies:blockhutfarmer"
+LUMBERJACK_HUT = "minecolonies:blockhutlumberjack"
+MINER_HUT = "minecolonies:blockhutminer"
 SCYTHE = "minecolonies:scythe"
 PLANKS = "minecraft:oak_planks"
 TABLE = "minecraft:crafting_table"
 HOE = "minecraft:iron_hoe"
 INGOT = "minecraft:iron_ingot"
 STICK = "minecraft:stick"
+WOODEN_AXE = "minecraft:wooden_axe"
+WOODEN_PICKAXE = "minecraft:wooden_pickaxe"
 
 
 def main() -> int:
@@ -162,7 +166,15 @@ def main() -> int:
             GRID["bl"], GRID["bm"], GRID["br"],
         )
 
-    # --- the three recipes the package carries --------------------------------
+    def hut_ring():
+        """The planks of `PCP/PBP/PPP`: every cell but the scepter's and the tool's."""
+        return every(
+            GRID["tl"], GRID["tr"],
+            GRID["ml"], GRID["mr"],
+            GRID["bl"], GRID["bm"], GRID["br"],
+        )
+
+    # --- the five recipes the package carries --------------------------------
     # `PPP/PCP/PPP`: planks around the crafting table.
     check(
         "town hall: 8 planks around a crafting table",
@@ -176,6 +188,21 @@ def main() -> int:
         [(PLANKS, 8), (HOE, 1)],
         [(PLANKS, ring(PLANKS)), (HOE, every(GRID["mm"]))],
         FARMER_HUT, 1, HOE,
+    )
+    # `PCP/PBP/PPP`: the two jobs' buildings, in upstream's own layout (planks, the scepter, the
+    # trade's tool) with the crafting table in the `structurize:sceptergold` slot, as the town
+    # hall's recipe does.
+    check(
+        "lumberjack's hut: planks around a crafting table and a wooden axe",
+        [(PLANKS, 7), (TABLE, 1), (WOODEN_AXE, 1)],
+        [(PLANKS, hut_ring()), (TABLE, every(GRID["tm"])), (WOODEN_AXE, every(GRID["mm"]))],
+        LUMBERJACK_HUT, 1, WOODEN_AXE,
+    )
+    check(
+        "mine: planks around a crafting table and a wooden pickaxe",
+        [(PLANKS, 7), (TABLE, 1), (WOODEN_PICKAXE, 1)],
+        [(PLANKS, hut_ring()), (TABLE, every(GRID["tm"])), (WOODEN_PICKAXE, every(GRID["mm"]))],
+        MINER_HUT, 1, WOODEN_PICKAXE,
     )
     # `I I`/` S `/` S `: two iron with a gap, the shaft below it. (The first shape, `II `/` S `/
     # ` S `, was exactly vanilla's iron hoe and crafted a hoe instead: the port moved an
@@ -194,6 +221,11 @@ def main() -> int:
         [(STICK, ring(STICK)), (TABLE, every(GRID["mm"]))],
     )
     empty_control(
+        "lumberjack's hut with a stick where the axe goes",
+        [(PLANKS, 7), (TABLE, 1), (STICK, 1)],
+        [(PLANKS, hut_ring()), (TABLE, every(GRID["tm"])), (STICK, every(GRID["mm"]))],
+    )
+    empty_control(
         "scythe with a stick where the iron goes",
         [(STICK, 3), (INGOT, 1)],
         [(STICK, every(GRID["tl"], GRID["tr"], GRID["mm"])), (INGOT, every(GRID["bm"]))],
@@ -203,8 +235,8 @@ def main() -> int:
         for line in failures:
             print(f"  FAIL {line}", file=sys.stderr)
         return 1
-    print("  three carried recipes craft their declared id and count, the grid empties,")
-    print("  each distinctive ingredient is consumed, and two wrong-ingredient controls craft nothing")
+    print("  five carried recipes craft their declared id and count, the grid empties,")
+    print("  each distinctive ingredient is consumed, and three wrong-ingredient controls craft nothing")
     return 0
 
 

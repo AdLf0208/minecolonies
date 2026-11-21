@@ -3,6 +3,8 @@
   "items": [
     "minecolonies:blockhuttownhall",
     "minecolonies:blockhutfarmer",
+    "minecolonies:blockhutlumberjack",
+    "minecolonies:blockhutminer",
     "minecolonies:scythe"
   ],
   "title": "itemGroup.minecolonies"

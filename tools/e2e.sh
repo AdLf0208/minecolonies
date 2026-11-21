@@ -6,6 +6,9 @@
 # Every mod command is typed with `ctl chat "/cmd"` because `ctl command` runs the console path
 # and bypasses the native `perform_command` hook.
 #
+# The scratch home goes under `E2E_TMP` when the launcher's env block exports one (the campaign's
+# `/tmp` is a 7.5 GB tmpfs that has filled before).
+#
 # The End, in the void at x=2000 (away from the central island, its dragon egg and the ambient
 # item entities of a generated level), on a stone floor laid before anything is placed.
 #
@@ -33,14 +36,22 @@
 #     fells all four logs, leaves the leaves, puts 4 oak_log in the colony's chest and replants
 #     a sapling on the stump's soil because the chest held one; a second tree with no sapling in
 #     the chest is felled the same way and its soil is left bare;
+# L1  the lumberjack's HUT is its building (slice 3): with none in the colony the assignment is
+#     REFUSED by name, and the citizen beside the whole tree leaves it whole over 200 ticks;
+# L2  the hut is placed: `/job info` reads "lumberjack's hut present" and the assignment is
+#     accepted; the tree then falls as in L;
+# L3  the hut is BROKEN: the block is air and the same command reads "lumberjack's hut missing",
+#     so the marker went with the block;
 #  M  a MINER: while the hired citizen is still unemployed an eight-block stone column over
 #     bedrock stays whole (the counterfactual), then `job assign … miner` digs it 1x1 down to
 #     the bedrock, leaves the bedrock and the four neighbouring floor blocks untouched, and puts
 #     8 cobblestone in the colony's chest;
-#  N  the three carried recipes (town hall, farmer's hut, scythe) are crafted in a real crafting
-#     table, each asserting its id, its count, an emptied grid and a consumed ingredient, with two
-#     wrong-ingredient controls that must craft nothing; the scythe is read back from the
-#     inventory and an unknown minecolonies id is refused.
+# M1  the MINE is the miner's building: placed inside the colony, `/job info` reads "mine present"
+#     before the assignment is accepted;
+#  N  the five carried recipes (town hall, farmer's hut, lumberjack's hut, mine, scythe) are
+#     crafted in a real crafting table, each asserting its id, its count, an emptied grid and a
+#     consumed ingredient, with wrong-ingredient controls that must craft nothing; the scythe is
+#     read back from the inventory and an unknown minecolonies id is refused.
 #
 # CONTROL=1 first launches the **unmodified** Nightly (`CONTROL_GAME`, the launcher's control
 # export): every mod id must then be unknown, which is what proves the package supplied them.
@@ -48,6 +59,8 @@
 # SELFTEST=1 inverts M's expected depth (9 blocks above the bedrock instead of 8): a miner that
 # stopped one block short must FAIL, proving the assertion can fail. FOUNDING_SELFTEST=1 flips
 # C's expectation instead (the second town hall must have been refused), the slice-1 leg.
+# HUT_SELFTEST=1 flips L3 (a broken hut must still read "present"), so a port whose marker
+# outlived its block passes that leg and fails the normal one: the break assertion can fail.
 #
 # The game must be a build of `horizon-mod.toml`'s `[native]` pin: a native `.hmod`'s Rust is
 # compiled by the launcher against exactly that build, so a game built at another pin is not
@@ -59,6 +72,7 @@ export LC_ALL=C
 CONTROL=${CONTROL:-0}
 SELFTEST=${SELFTEST:-0}
 FOUNDING_SELFTEST=${FOUNDING_SELFTEST:-0}
+HUT_SELFTEST=${HUT_SELFTEST:-0}
 
 CLONE=${CLONE:-$(cd "$(dirname "$0")/../../.." && pwd)}
 PORT=$CLONE/ports/minecolonies
@@ -95,6 +109,10 @@ TREE_TOP=$((FLOOR + 5))
 # The miner digs straight down from the third hire's own feet (y = FLOOR + 1), so its shaft is the
 # arena's floor block at FLOOR and the seven under it, with bedrock eight blocks below.
 SHAFT_X=$((X0 + 4)); SHAFT_Z=0
+# Slice 3: each job's building stands inside the colony, away from the trees, the crops and the
+# shaft the citizens work.
+LHUT_X=$((X0 + 2)); LHUT_Y=$((FLOOR + 1)); LHUT_Z=-4
+MINE_X=$((X0 + 6)); MINE_Y=$((FLOOR + 1)); MINE_Z=4
 SHAFT_TOP=$FLOOR
 SHAFT_BOTTOM=$((FLOOR - 8))
 EXPECT_DEPTH=${EXPECT_DEPTH:-8}
@@ -108,7 +126,7 @@ command -v jq >/dev/null || { echo "missing jq (every assertion parses a ctl rep
 [ -x "$GAME" ] || { echo "missing horizon-client: $GAME" >&2; exit 1; }
 [ -d "$RES/assets" ] || { echo "missing prepared resources: $RES" >&2; exit 1; }
 
-SCRATCH=$(mktemp -d /tmp/opencode/minecolonies-home.XXXXXX)
+SCRATCH=$(mktemp -d "${E2E_TMP:-/tmp/opencode}"/minecolonies-home.XXXXXX)
 export HORIZON_HOME=$SCRATCH/game
 export HORIZON_LAUNCHER_HOME=$SCRATCH/launcher
 export XDG_DATA_HOME=$SCRATCH/data
@@ -460,19 +478,23 @@ citizen_and_job() {
     echo "  $listing" >&2
 
     echo "== H: the job needs its building, then is assigned =="
-    # Without the hut the assignment is refused; the hut was placed in F, so first prove the
-    # refusal on a colony with the hut moved out of range is not needed here: instead prove the
-    # hut rule by reading /job info (hut present) and by the assignment being accepted.
+    # An unemployed citizen has no building; the farmer's hut placed in F is what the assigned
+    # job's rule then reads, so the same command changes from "no building" to "present".
     say "minecolonies job info Ada"
     local job_line
     job_line=$(line "Ada: job") || fail "no /job info line"
     echo "  $job_line" >&2
-    grep -q "farmer's hut present" <<<"$job_line" || fail "the job line does not see the hut: $job_line"
+    grep -q "Ada: job Unemployed" <<<"$job_line" || fail "Ada is not unemployed before the job: $job_line"
+    grep -q ", no building\." <<<"$job_line" || fail "an unemployed citizen claims a building: $job_line"
     say "minecolonies job assign Ada farmer"
     local assigned
     assigned=$(line 'is now the colony') || fail "no assignment line"
     echo "  $assigned" >&2
     grep -q "farmer" <<<"$assigned" || fail "the assignment line is not a farmer: $assigned"
+    say "minecolonies job info Ada"
+    job_line=$(line "Ada: job") || fail "no /job info line after the assignment"
+    echo "  $job_line" >&2
+    grep -q "farmer's hut present" <<<"$job_line" || fail "the job line does not see the hut: $job_line"
     say "minecolonies citizen list"
     listing=$(line 'Ada — Farmer') || fail "the roster does not show Ada as the farmer"
     echo "  $listing" >&2
@@ -671,7 +693,32 @@ lumberjack_job() {
     tree_stands "$TREE1_X" "$TREE1_Z" || fail "an unemployed citizen felled the tree at $TREE1_X,$TREE1_Z"
     echo "  the unemployed citizen left the tree whole (4 logs and the leaves stand)" >&2
 
+    echo "== L1: the lumberjack's hut is its building: without it the assignment is refused =="
+    say "minecolonies job assign Bo lumberjack"
+    ctl wait 12 >/dev/null
+    local without
+    without=$(line "needs lumberjack's hut in the colony") \
+        || fail "Bo was made a lumberjack with no lumberjack's hut in the colony"
+    echo "  without its hut: $without" >&2
+    # The counterfactual the case needs: a citizen beside a whole tree with the hut absent leaves
+    # it whole, so the fell after the hut is placed is the hut's doing and not the assignment's.
+    ctl wait 200 >/dev/null
+    tree_stands "$TREE1_X" "$TREE1_Z" \
+        || fail "a citizen beside a whole tree felled it with no lumberjack's hut in the colony"
+
+    echo "== L2: the hut is placed, job info reads it, and the tree falls =="
+    place "$LHUT_X" "$LHUT_Y" "$LHUT_Z" minecolonies:blockhutlumberjack
+    block_is "$LHUT_X" "$LHUT_Y" "$LHUT_Z" minecolonies:blockhutlumberjack \
+        || fail "the lumberjack's hut did not place"
+    # The assignment is accepted now that the hut stands; `job info` then reports *Bo's own*
+    # job's building — the same command that read "no building" while Bo was unemployed.
     assign_job Bo lumberjack lumberjack
+    local job_line
+    say "minecolonies job info Bo"
+    job_line=$(line "Bo: job") || fail "no /job info line for Bo"
+    echo "  $job_line" >&2
+    grep -q "lumberjack's hut present" <<<"$job_line" \
+        || fail "job info does not see the lumberjack's hut: $job_line"
     # Four logs, one per work step, and the walk that may precede them.
     if ! await_ticks 600 40 tree_felled "$TREE1_X" "$TREE1_Z"; then
         info
@@ -711,6 +758,39 @@ lumberjack_job() {
     [ "$(felled)" = "$((felled_before + 8))" ] || fail "the colony counted $(felled) logs felled, not $((felled_before + 8))"
     [ "$(dug)" = "$dug_before" ] || fail "the lumberjack changed the dug counter"
     echo "  the second tree fell too, its soil bare (no sapling in the chest), 8 logs in all" >&2
+
+    echo "== L3: breaking the hut takes the building with it =="
+    # A **survival** break with an axe: a creative break drops nothing in vanilla, so the hut's own
+    # loot table would never run. The block is in `minecraft:mineable/axe`, which is what makes the
+    # break a couple of seconds; the marker's rule is the same moment in either mode.
+    ctl command "gamemode survival" >/dev/null
+    ctl command "item replace entity @s hotbar.0 with minecraft:iron_axe 1" >/dev/null
+    ctl wait 4 >/dev/null
+    ctl select 1 >/dev/null
+    ctl wait 2 >/dev/null
+    local broken
+    broken=$(ctl break "$LHUT_X" "$LHUT_Y" "$LHUT_Z" --timeout 40) \
+        || fail "the lumberjack's hut could not be broken"
+    ctl command "gamemode creative" >/dev/null
+    ctl wait 10 >/dev/null
+    block_is "$LHUT_X" "$LHUT_Y" "$LHUT_Z" minecraft:air \
+        || fail "the lumberjack's hut still stands after the break"
+    # The hut's own loot table: the broken block drops the item a player can place again.
+    echo "  the break dropped $(jq -c '.drops' <<<"$broken")" >&2
+    jq -e '.drops["minecolonies:blockhutlumberjack"] == 1' <<<"$broken" >/dev/null \
+        || fail "the broken hut did not drop its own item (loot table): $(jq -c '.drops' <<<"$broken")"
+    say "minecolonies job info Bo"
+    job_line=$(line "Bo: job") || fail "no /job info line for Bo after the break"
+    echo "  after the break: $job_line" >&2
+    if [ "$HUT_SELFTEST" = 1 ]; then
+        echo "(selftest: the broken hut must still read present)"
+        grep -q "lumberjack's hut present" <<<"$job_line" \
+            || fail "selftest: the broken hut reads missing, so the marker went with the block"
+    else
+        grep -q "lumberjack's hut missing" <<<"$job_line" \
+            || fail "job info still sees a broken hut: $job_line"
+        echo "  the broken hut reads missing, so the marker went with the block" >&2
+    fi
 }
 
 # The miner's column: eight stone over bedrock, under the third citizen's own hire position.
@@ -747,7 +827,15 @@ miner_job() {
     column_whole 8 || fail "an unemployed citizen dug the column at $SHAFT_X,$SHAFT_Z"
     echo "  the unemployed citizen left the 8-block column whole" >&2
 
+    echo "== M1: the mine is the miner's building =="
+    place "$MINE_X" "$MINE_Y" "$MINE_Z" minecolonies:blockhutminer
+    block_is "$MINE_X" "$MINE_Y" "$MINE_Z" minecolonies:blockhutminer || fail "the mine did not place"
     assign_job Cass miner miner
+    local job_line
+    say "minecolonies job info Cass"
+    job_line=$(line "Cass: job") || fail "no /job info line for Cass"
+    echo "  $job_line" >&2
+    grep -q "mine present" <<<"$job_line" || fail "job info does not see the mine: $job_line"
     local depth=${EXPECT_DEPTH:-8}
     if ! await_ticks 900 40 column_air "$depth"; then
         info
@@ -801,4 +889,4 @@ lumberjack_job
 miner_job
 craft_and_items
 
-echo "PASS: the town hall founded a persisted colony (name, owner, 64-block radius), a second hall was refused when too close (including 120 blocks across and 120 up) and when the owner had one already, a citizen joined, took the farmer's job, harvested a mature crop and walked to the next, a citizen with no colony did nothing, the colony and its job survived quit and relaunch, a lumberjack felled two whole four-log trees (leaves untouched, 4 logs in the colony's chest each, a sapling replanted only when the chest held one) while an unemployed citizen left its tree whole, and a miner sank a 1x1 8-block shaft to the bedrock (bedrock and its neighbours untouched, 8 cobblestone in the chest) while an unemployed citizen left its column whole, and all three carried recipes crafted their id and count in a real table with two wrong-ingredient controls that crafted nothing"
+echo "PASS: the town hall founded a persisted colony (name, owner, 64-block radius), a second hall was refused when too close (including 120 blocks across and 120 up) and when the owner had one already, a citizen joined, took the farmer's job, harvested a mature crop and walked to the next, a citizen with no colony did nothing, the colony and its job survived quit and relaunch, a lumberjack felled two whole four-log trees (leaves untouched, 4 logs in the colony's chest each, a sapling replanted only when the chest held one) while an unemployed citizen left its tree whole, and a miner sank a 1x1 8-block shaft to the bedrock (bedrock and its neighbours untouched, 8 cobblestone in the chest) while an unemployed citizen left its column whole, both job buildings are the jobs' own (the lumberjack's hut refused, then seen, then missing once broken; the mine seen before the miner works), and all five carried recipes crafted their id and count in a real table with wrong-ingredient controls that crafted nothing"

@@ -29,6 +29,9 @@ import gen_assets
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT
 MOD = "minecolonies"
+# Every hut block the package carries: the town hall and the three jobs' buildings. One list,
+# so a block declaration, its loot table and its tag entry are the same set by construction.
+HUTS = ("blockhuttownhall", "blockhutfarmer", "blockhutlumberjack", "blockhutminer")
 
 
 def block(
@@ -69,26 +72,17 @@ def data_files() -> dict[str, bytes]:
     # block is blast-proof in practice. `sounds` names a vanilla *block* whose sound type is
     # copied (oak planks: wood, as `SoundType.WOOD` upstream), and the block occludes as
     # little as upstream's `noOcclusion`.
-    out[f"data/{MOD}/horizon/block/blockhuttownhall.json"] = j(
-        block(
-            template="minecraft:stone",
-            hardness=10.0,
-            resistance=1200.0,
-            sounds="minecraft:oak_planks",
-            occludes=False,
-            facing=True,
+    for hut in HUTS:
+        out[f"data/{MOD}/horizon/block/{hut}.json"] = j(
+            block(
+                template="minecraft:stone",
+                hardness=10.0,
+                resistance=1200.0,
+                sounds="minecraft:oak_planks",
+                occludes=False,
+                facing=True,
+            )
         )
-    )
-    out[f"data/{MOD}/horizon/block/blockhutfarmer.json"] = j(
-        block(
-            template="minecraft:stone",
-            hardness=10.0,
-            resistance=1200.0,
-            sounds="minecraft:oak_planks",
-            occludes=False,
-            facing=True,
-        )
-    )
     # The farmer's tool: upstream's scythe is a plain tool item.
     out[f"data/{MOD}/horizon/item/scythe.json"] = j(
         {"template": "minecraft:iron_hoe", "components": {"minecraft:max_damage": 250}}
@@ -106,13 +100,12 @@ def data_files() -> dict[str, bytes]:
             "title": f"itemGroup.{MOD}",
             "icon": f"{MOD}:blockhuttownhall",
             "items": [
-                f"{MOD}:blockhuttownhall",
-                f"{MOD}:blockhutfarmer",
+                *(f"{MOD}:{hut}" for hut in HUTS),
                 f"{MOD}:scythe",
             ],
         }
     )
-    for hut in ("blockhuttownhall", "blockhutfarmer"):
+    for hut in HUTS:
         out[f"data/{MOD}/loot_table/blocks/{hut}.json"] = j(
             {
                 "type": "minecraft:block",
@@ -158,6 +151,24 @@ def data_files() -> dict[str, bytes]:
             "result": {"count": 1, "id": f"{MOD}:blockhutfarmer"},
         }
     )
+    # The two jobs' buildings, in upstream's own layout (`XTX/XBX/XXX`: planks, the scepter, the
+    # trade's tool) with the port's standing vanilla substitutions: the `structurize:sceptergold`
+    # slot holds a crafting table, as the town hall's recipe already does, and the tool is
+    # upstream's own (`wooden_axe` for the forester, `wooden_pickaxe` for the mine).
+    for hut, tool in (("blockhutlumberjack", "minecraft:wooden_axe"), ("blockhutminer", "minecraft:wooden_pickaxe")):
+        out[f"data/{MOD}/recipe/{hut}.json"] = j(
+            {
+                "type": "minecraft:crafting_shaped",
+                "category": "misc",
+                "key": {
+                    "P": "#minecraft:planks",
+                    "C": "minecraft:crafting_table",
+                    "B": tool,
+                },
+                "pattern": ["PCP", "PBP", "PPP"],
+                "result": {"count": 1, "id": f"{MOD}:{hut}"},
+            }
+        )
     # Upstream's scythe is not a crafting-table recipe at all (the jar carries none; the
     # builder's crafter recipes make the tools), so this shape is the port's own. Its first
     # version was `II `/` S `/` S ` — exactly vanilla's iron hoe, which shadowed it and made the
@@ -173,7 +184,7 @@ def data_files() -> dict[str, bytes]:
         }
     )
     out["data/minecraft/tags/block/mineable/axe.json"] = j(
-        {"values": [f"{MOD}:blockhuttownhall", f"{MOD}:blockhutfarmer"]}
+        {"values": [f"{MOD}:{hut}" for hut in HUTS]}
     )
     return out
 

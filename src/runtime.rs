@@ -53,6 +53,14 @@ pub const BEDROCK: &str = "minecraft:bedrock";
 pub const TOWN_HALL: &str = "minecolonies:blockhuttownhall";
 /// The farmer's hut block: a farmer works only where the colony has its building.
 pub const FARMER_HUT: &str = "minecolonies:blockhutfarmer";
+/// The lumberjack's hut block (`block.minecolonies.blockhutlumberjack`, which upstream's lang
+/// labels *Forester's Hut*): the building a lumberjack's job needs.
+pub const LUMBERJACK_HUT: &str = "minecolonies:blockhutlumberjack";
+/// The mine block (`block.minecolonies.blockhutminer`, *Mine*): the building a miner's job needs.
+pub const MINER_HUT: &str = "minecolonies:blockhutminer";
+/// Every hut this port carries: the block-entity registration, the marker's check and the break
+/// handler all read this one list, so a new job's building is added in one place.
+pub const HUTS: [&str; 3] = [FARMER_HUT, LUMBERJACK_HUT, MINER_HUT];
 /// The citizen's content entity type.
 pub const CITIZEN: &str = "minecolonies:citizen";
 /// The crop the farmer works (`Blocks.WHEAT`).
@@ -292,14 +300,28 @@ impl Job {
         }
     }
 
-    /// The building the job needs, when this slice has that block. Upstream gives every job a
-    /// building; only the farmer's hut exists in this port so far (`FARMER_HUT`), so the two
-    /// new jobs are assignable without one (a gap in `notes.md`, not a rule upstream lacks).
+    /// The building the job needs, or `None` for a job this slice gives none. Upstream gives
+    /// every job a building (`JobLumberjack`/`BuildingLumberjack`, `JobMiner`/`BuildingMiner`,
+    /// `JobFarmer`/`BuildingFarmer`); this port carries all three hut blocks, so every working
+    /// job answers one here and the rule is the same for each.
     #[must_use]
     pub const fn building(self) -> Option<&'static str> {
         match self {
             Self::Farmer => Some(FARMER_HUT),
-            _ => None,
+            Self::Lumberjack => Some(LUMBERJACK_HUT),
+            Self::Miner => Some(MINER_HUT),
+            Self::Unemployed => None,
+        }
+    }
+
+    /// The job's building as the feedback names it: "farmer's hut", "lumberjack's hut", "mine".
+    #[must_use]
+    pub const fn building_label(self) -> Option<&'static str> {
+        match self {
+            Self::Farmer => Some("farmer's hut"),
+            Self::Lumberjack => Some("lumberjack's hut"),
+            Self::Miner => Some("mine"),
+            Self::Unemployed => None,
         }
     }
 
@@ -319,6 +341,23 @@ impl fmt::Display for Job {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.label())
     }
+}
+
+/// How `/minecolonies job info` reports a job's building: "lumberjack's hut present",
+/// "mine missing", or "no building" for the unemployed citizen this slice gives none.
+#[must_use]
+pub fn building_status(job: Job, present: bool) -> String {
+    match (job.building_label(), present) {
+        (Some(label), true) => format!("{label} present"),
+        (Some(label), false) => format!("{label} missing"),
+        (None, _) => "no building".to_owned(),
+    }
+}
+
+/// Whether `id` is one of the hut blocks this port carries (a job's building).
+#[must_use]
+pub fn is_hut(id: &str) -> bool {
+    HUTS.contains(&id)
 }
 
 /// One citizen of the roster.
@@ -1637,7 +1676,8 @@ mod tests {
             assert_eq!(Job::from_id(job.id()), Some(job));
         }
         assert_eq!(Job::Unemployed.building(), None);
-        assert_eq!(Job::Lumberjack.building(), None);
+        assert_eq!(Job::Lumberjack.building(), Some(LUMBERJACK_HUT));
+        assert_eq!(Job::Miner.building(), Some(MINER_HUT));
         assert_eq!(Job::Farmer.building(), Some(FARMER_HUT));
         assert_eq!(Job::Unemployed.delay(), None);
         assert_eq!(Job::Farmer.delay(), Some(FARMER_DELAY_TICKS));
@@ -1648,6 +1688,62 @@ mod tests {
             None,
             "a job this slice does not implement"
         );
+    }
+
+    // --- slice 3: every job's own building ----------------------------------------------------
+
+    #[test]
+    fn every_working_job_names_the_building_its_rule_needs() {
+        // Upstream gives each job a building; the port now carries all three blocks, so no
+        // working job is assignable without one (the 0.2.4 deviation, closed).
+        for job in [Job::Farmer, Job::Lumberjack, Job::Miner] {
+            let building = job.building().expect("a working job needs its building");
+            assert!(is_hut(building), "{building} is not one of the port's huts");
+            assert!(
+                job.building_label().is_some(),
+                "{} has a building but no name for it",
+                job.label()
+            );
+        }
+        assert_eq!(Job::Unemployed.building(), None);
+        assert_eq!(Job::Unemployed.building_label(), None);
+        assert_eq!(Job::Farmer.building(), Some(FARMER_HUT));
+        assert_eq!(Job::Lumberjack.building(), Some(LUMBERJACK_HUT));
+        assert_eq!(Job::Miner.building(), Some(MINER_HUT));
+    }
+
+    #[test]
+    fn job_info_names_each_building_the_way_the_command_says_it() {
+        assert_eq!(
+            building_status(Job::Lumberjack, true),
+            "lumberjack's hut present"
+        );
+        assert_eq!(
+            building_status(Job::Lumberjack, false),
+            "lumberjack's hut missing"
+        );
+        assert_eq!(building_status(Job::Farmer, true), "farmer's hut present");
+        assert_eq!(building_status(Job::Farmer, false), "farmer's hut missing");
+        assert_eq!(building_status(Job::Miner, true), "mine present");
+        assert_eq!(building_status(Job::Miner, false), "mine missing");
+        assert_eq!(building_status(Job::Unemployed, true), "no building");
+    }
+
+    #[test]
+    fn the_huts_are_the_three_blocks_the_port_carries() {
+        assert_eq!(HUTS.len(), 3);
+        for hut in HUTS {
+            assert!(is_hut(hut), "{hut} is carried but not recognised");
+        }
+        for other in [
+            TOWN_HALL,
+            "minecolonies:blockhutbuilder",
+            "minecraft:chest",
+            "minecraft:oak_planks",
+            "",
+        ] {
+            assert!(!is_hut(other), "{other} is not a hut");
+        }
     }
 
     #[test]

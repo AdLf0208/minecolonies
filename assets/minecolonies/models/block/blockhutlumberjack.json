@@ -1,0 +1,79 @@
+{
+  "elements": [
+    {
+      "faces": {
+        "down": {
+          "cullface": "down",
+          "texture": "#minecolonies:block/blockhutlumberjack",
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ]
+        },
+        "east": {
+          "texture": "#minecolonies:block/blockhutlumberjack",
+          "uv": [
+            0,
+            0,
+            16,
+            8
+          ]
+        },
+        "north": {
+          "texture": "#minecolonies:block/blockhutlumberjack",
+          "uv": [
+            0,
+            0,
+            16,
+            8
+          ]
+        },
+        "south": {
+          "texture": "#minecolonies:block/blockhutlumberjack",
+          "uv": [
+            0,
+            0,
+            16,
+            8
+          ]
+        },
+        "up": {
+          "texture": "#minecolonies:block/blockhutlumberjack",
+          "uv": [
+            0,
+            0,
+            16,
+            16
+          ]
+        },
+        "west": {
+          "texture": "#minecolonies:block/blockhutlumberjack",
+          "uv": [
+            0,
+            0,
+            16,
+            8
+          ]
+        }
+      },
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        16,
+        8,
+        16
+      ]
+    }
+  ],
+  "textures": {
+    "bottom": "minecolonies:block/blockhutlumberjack",
+    "particle": "minecolonies:block/blockhutlumberjack",
+    "side": "minecolonies:block/blockhutlumberjack",
+    "top": "minecolonies:block/blockhutlumberjack"
+  }
+}

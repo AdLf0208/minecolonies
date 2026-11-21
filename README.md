@@ -1,8 +1,8 @@
-# MineColonies for Horizon — slices 1 and 2
+# MineColonies for Horizon — slices 1, 2 and 3
 
 A Horizon port of [MineColonies](https://github.com/ldtteam/minecolonies): **a town hall founds a
-colony, its citizens take jobs that tick in the world** — a farmer, a lumberjack and a miner —
-and `/minecolonies colony|citizen|job` configures it.
+colony, its citizens take jobs that tick in the world** — a farmer, a lumberjack and a miner, each
+in **its own building** — and `/minecolonies colony|citizen|job` configures it.
 
 Delivered as **one flat SDK package**: [`minecolonies.hmod`](minecolonies.hmod) — `horizon-mod.toml`
 (api `0.2`, `side = "both"`, `capabilities = ["registries"]`, `[native]` pinned to
@@ -24,11 +24,16 @@ shows the colony.
   ticks on the roster's own cadence:
   - **farmer** — needs a `minecolonies:blockhutfarmer`; walks to a mature crop inside the colony,
     harvests it and leaves it replanted; the colony counts the crop.
-  - **lumberjack** — finds a tree inside the colony, walks to it and fells **every connected log**
+  - **lumberjack** — needs a `minecolonies:blockhutlumberjack`; finds a tree inside the colony,
+    walks to it and fells **every connected log**
     from the top down, leaving the leaves; the logs go into the colony's chest and the colony counts
     them; the stump's soil gets a sapling back **when the chest holds one**.
-  - **miner** — sinks a **1×1 shaft** straight down from where it stands, one block per step, never
-    into bedrock, water or lava, never past the colony, and every drop goes into the colony's chest.
+  - **miner** — needs a `minecolonies:blockhutminer` (the mine); sinks a **1×1 shaft** straight
+    down from where it stands, one block per step, never into bedrock, water or lava, never past the
+    colony, and every drop goes into the colony's chest.
+  A job is **refused** while its building is not standing inside the colony, `/minecolonies job info`
+  reports the building as `present` or `missing`, and **breaking the hut** takes the building with
+  it.
 - **Persistence.** The colony, its roster, its job counters and each citizen's job are saved with
   the world, and the jobs resume after a relaunch.
 
@@ -36,8 +41,7 @@ shows the colony.
 
 The other ~35 jobs, the builder and the building schematics, the research tree, the colony and
 citizen UIs, happiness, saturation, requests, raids, permissions, colony growth from buildings and
-world-gen colonies are **not implemented**, and the lumberjack and miner are assignable without
-their own buildings (this port ships no lumberjack's hut or mine) — see
+world-gen colonies are **not implemented** — see
 [`notes.md`](notes.md#gaps-stated-not-hidden) and its coverage table.
 The citizen draws with its villager template's model; its own texture is generated but a renderer
 for it is a later slice.
