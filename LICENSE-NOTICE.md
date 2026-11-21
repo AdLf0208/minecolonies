@@ -17,7 +17,10 @@ the original code, with its complete corresponding source published.
 
 ## This port
 
-- **Licence:** GNU GPL v3 **or later**, the same terms as the original code. The full text is in
+- **Licence:** GNU GPL **version 3 only** (`GPL-3.0-only`), the scope the registry entry declares and
+  the one the jar and the repository state (both say `GPL3`; the licence file carries no "or later"
+  clause). A derivative may be distributed under v3 alone even where the original offered a later
+  version. The full text is in
   [`LICENSE`](LICENSE). No further restriction is added.
 - **Corresponding source:** published with the port (this repository: the Rust sources under
   `src/`, the generators under `tools/`, and the generated content under `assets/` and `data/`).

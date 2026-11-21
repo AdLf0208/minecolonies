@@ -1,7 +1,60 @@
-# VALIDATION — MineColonies slice 1
+# VALIDATION — MineColonies slices 1 and 2
 
-Every line is a command and its result, run in `ports/minecolonies` through the campaign's build
-slots (`ports/tools/build-slot.sh`, `BUILD_LOCAL=1`: the second machine is unreachable).
+Validated on Linux with Rust 1.99.1 against **Horizon
+`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** (Nightly 2026-11-20) and horizon-mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, through `ports/tools/build-slot.sh`
+(`BUILD_LOCAL=1`, `CARGO_INCREMENTAL=0`, no bare `cargo`, no `--target-dir`).
+
+## 0.2.4 — slice 2, the `lumberjack` and `miner` jobs (2026-11-21)
+
+| Check | Command | Result |
+|---|---|---|
+| repin | `cargo horizon-mod update --horizon 0a875da…` | *"none of the 287 items it uses changed"*, pinned; `.horizon/sdk` refetched |
+| runtime first (red) | `cargo test --offline`, the three new rules as `unimplemented!()` | **41 passed, 14 failed** — `not implemented: the tree's connected cluster` / `the miner's shaft` (`sdk-test-slice2-red.log`) |
+| tests | `cargo test --offline --locked` | **55 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --offline --locked --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`sdk-clippy.log`) |
+| format | `cargo fmt --check` | `FMT_EXIT:0` (`sdk-fmt.log`) |
+| package, twice | `rm -f Cargo.lock && cargo horizon-mod build` ×2 | `CMP:identical`, **63,940 B**, sha256 `d81dcd77b30d37f2c0291ee2b4ee736e03848754d04661f31dc7493960dac0aa` (`sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.log`) |
+| registry check | `cargo horizon-mod check <delivered file>` | `minecolonies 0.2.4 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`; 63,940 B, same sha (`sdk-check.log`) |
+| source compile | `cargo horizon-mod check --uses <delivered file>` | exit 0 (`sdk-check-uses.log`) |
+| fits the pin | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for` (`sdk-fits.log`) |
+| fits another build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits` (`sdk-fits-other.log`) |
+| content | `python3 tools/gen_assets.py --check` + `tools/assemble_content.py --check` | 15 assets byte-identical, `data/` matches (`sdk-assets.log`) |
+| package contents | unzip listing | **37 entries**, `LICENSE` + `LICENSE-NOTICE.md`, no `Cargo.lock` (`sdk-entries.txt`) |
+| gate | `python3 ports/tools/verify-sdk-package.py minecolonies` | **1/1 package(s) verified** |
+| game build | `ports/tools/launcher-game.sh build minecolonies` | `Compiling minecolonies (1 of 1)` |
+| in game | `build-slot.sh run … --step e2e -- tools/e2e.sh` | **PASS**, `EXIT:0`, phases A–N (`minecolonies-e2e/e2e-launcher.log`) |
+| control | `GAME=$CONTROL_GAME tools/e2e.sh` | **FAIL** at `Unknown item 'minecolonies:blockhuttownhall'`, `EXIT:1` (`e2e-launcher-control.log`) |
+| control inside one run | `CONTROL=1 tools/e2e.sh` | control leg *"without the package: no town hall item"*, then modded **PASS** `EXIT:0` (`e2e-launcher-control-inside.log`) |
+| fail-capability (depth) | `SELFTEST=1 tools/e2e.sh` | **FAIL** `the miner did not dig 9 blocks above the bedrock`, `EXIT:1` (`e2e-selftest.log`) |
+| fail-capability (founding) | `FOUNDING_SELFTEST=1 tools/e2e.sh` | **FAIL** `selftest: the second town hall was refused, as it should be`, `EXIT:1` (`e2e-founding-selftest.log`) |
+| log gate | `python3 ports/tools/check-e2e-logs.py minecolonies-e2e --strict` | `logs=5 ok=5`, exit 0 |
+| coverage | `python3 ports/tools/check-coverage.py minecolonies` | `missing_families=0 missing=0`, exit 0 |
+
+The in-game leg's own new assertions (phases L–N), from `e2e-launcher.log`:
+
+```
+== L: a lumberjack fells whole trees, leaves the leaves, and replants from the chest ==
+  the unemployed citizen left the tree whole (4 logs and the leaves stand)
+  Bo is now the colony's lumberjack.
+  after the fell: soil at 2004,101,-1 is 'minecraft:dirt', stump is 'minecraft:oak_sapling',
+    chest [{"count":4,"item":"minecraft:oak_log"}]
+  the second tree fell too, its soil bare (no sapling in the chest), 8 logs in all
+== M: a miner sinks a 1x1 shaft to the bedrock and collects every drop ==
+  the unemployed citizen left the 8-block column whole
+  Cass is now the colony's miner.
+  the shaft is 1x1 and 8 deep, the bedrock untouched, 8 cobblestone in the chest
+== N: the carried recipes craft, and the carried items are real ids ==
+  town hall: 8 planks around a crafting table -> {"count": 1, "item": "minecolonies:blockhuttownhall", …}
+  farmer's hut: 8 planks around an iron hoe -> {"count": 1, "item": "minecolonies:blockhutfarmer", …}
+  scythe: two iron ingots with a gap over two sticks -> {"count": 1, "item": "minecolonies:scythe", …}
+  scythe with a stick where the iron goes -> null
+  the scythe is real, an unknown id is refused: Unknown item 'minecolonies:no_such_item'
+```
+
+The leg launches `--offscreen` (phase N opens a crafting table's menu; a menu needs a screen).
+
+## History — 0.1.x `.hnmod` (superseded)
 
 > **History only.** This file records the 0.1.x `.hnmod` ladder (§1–§6). The 0.2.0 flat SDK package
 > (pin `0b14f8a`, 2026-11-18) is verified by `notes.md` §"Verification" and by the logs

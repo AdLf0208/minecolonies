@@ -1,4 +1,4 @@
-# FINDINGS — MineColonies 1.1.1411 slice 1 (town hall → colony → citizen → one job)
+# FINDINGS — MineColonies 1.1.1411 slices 1–2 (town hall → colony → citizens → farmer, lumberjack, miner)
 
 Ported from **ldtteam/minecolonies**, branch `version/main`, commit
 `3438c06fc92947b28bbd2fda29f00e207b967a22` (2026-11-11), shallow clone in
@@ -44,6 +44,18 @@ between the jar's release and this commit for the areas used (founding, jobs, co
 | Citizen data holds colony, id, name, job, home building, saturation; full saturation 60 | `api/colony/ICitizenData.java:30`, `core/colony/CitizenData.java` |
 | Citizen names are generated per colony from a name file; gender and texture chosen at random | `core/colony/CitizenData.java:515-527` |
 | The citizen entity carries its colony id and citizen id and a custom name | `core/colony/CitizenData.java:552-560` |
+
+## The two jobs added by slice 2
+
+| Fact | Where |
+|---|---|
+| Job ids `minecolonies:lumberjack` and `minecolonies:miner`; the language labels the lumberjack **Forester** and the miner **Miner** | `assets/minecolonies/lang/en_us.json`: `com.minecolonies.job.lumberjack`, `com.minecolonies.job.miner` |
+| The lumberjack "cuts down trees and replants them based on the configured specifications"; the miner "mines out a shaft system under the colony, gathering blocks and ores" | same file, `minecolonies:lumberjack.job.desc`, `minecolonies:miner.job.desc` |
+| A tree's trunk blocks are `minecraft:logs`: `*_log`/`*_wood`/`*_stem`/`*_hyphae` at 26.3, and the SDK has no block-tag query | the prepared resources' `block-tags.json` (`/home/adlf/.local/…/26.3/block-tags.json`) |
+| A sapling grows on dirt, grass, podzol, coarse/rooted dirt, moss, farmland and mud; the Nether's stems grow fungi | vanilla `SaplingBlock.canSurvive`/`NetherFungusBlock`; the port's `runtime::grows_a_sapling`/`sapling_for` |
+| Every job steps once per `max(1, 40 - skill / 2)` ticks — 40 at skill 0 | `EntityAIWorkFarmer.java:85,692`, the shape all three jobs use in this slice |
+| A job needs its building upstream (`JobLumberjack`/`BuildingLumberjack`, `JobMiner`/`BuildingMiner`); this port carries neither block, so the two jobs are assignable without one (a deviation) | the jar's class inventory (`JobLumberjack.class`, `JobMiner.class`, `BuildingLumberjack.class`, `BuildingMiner.class`) |
+| Upstream's builder recipes make the tools; `minecolonies:scythe` has **no** crafting-table recipe in the jar | `data/minecolonies/recipe/*.json` in the jar (no `scythe.json`); the port's own recipe is recorded as port content |
 
 ## The job that is ported: farmer
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# In-game check for MineColonies slice 1: a town hall founds a colony, one citizen joins it and
-# farms, and the colony survives a quit and relaunch.
+# In-game check for MineColonies slices 1 and 2: a town hall founds a colony, a citizen joins it
+# and farms, a lumberjack fells whole trees and replants them, a miner sinks a 1x1 shaft, and the
+# colony survives a quit and relaunch.
 #
 # Every mod command is typed with `ctl chat "/cmd"` because `ctl command` runs the console path
 # and bypasses the native `perform_command` hook.
@@ -8,7 +9,7 @@
 # The End, in the void at x=2000 (away from the central island, its dragon egg and the ambient
 # item entities of a generated level), on a stone floor laid before anything is placed.
 #
-# Default run (`--dev-mod`, the flat SDK package directory):
+# Default run (the launcher-built game carrying the flat SDK package):
 #  A  placing the town hall founds a colony: the default "<owner>'s Colony", a 64-block radius
 #     (4 chunks), owner set, saved in the block entity;
 #  B  `/minecolonies colony rename Riverside` renames it and the next read shows the new name;
@@ -26,15 +27,27 @@
 #  J  a citizen with NO colony tag, beside its own mature crop far outside the colony, does
 #     nothing: the crop stays mature and the citizen does not move (the differential);
 #  K  the colony survives `quit` and a relaunch: name, roster, radius and harvested count are
-#     the same, and the job ticks again on a fresh crop.
+#     the same, and the job ticks again on a fresh crop;
+#  L  a LUMBERJACK: a four-log oak tree with a leaves cap; while the hired citizen is still
+#     unemployed the tree stays whole (the counterfactual), then `job assign … lumberjack`
+#     fells all four logs, leaves the leaves, puts 4 oak_log in the colony's chest and replants
+#     a sapling on the stump's soil because the chest held one; a second tree with no sapling in
+#     the chest is felled the same way and its soil is left bare;
+#  M  a MINER: while the hired citizen is still unemployed an eight-block stone column over
+#     bedrock stays whole (the counterfactual), then `job assign … miner` digs it 1x1 down to
+#     the bedrock, leaves the bedrock and the four neighbouring floor blocks untouched, and puts
+#     8 cobblestone in the colony's chest;
+#  N  the three carried recipes (town hall, farmer's hut, scythe) are crafted in a real crafting
+#     table, each asserting its id, its count, an emptied grid and a consumed ingredient, with two
+#     wrong-ingredient controls that must craft nothing; the scythe is read back from the
+#     inventory and an unknown minecolonies id is refused.
 #
-# CONTROL=1 first launches the same game with **no `--dev-mod`**: every mod id must then be
-# unknown, which is what proves the loaded package supplied them. (The retired `.hnmod` needed an
-# embedded-content leg for this; a flat package *is* its content, so the control is the plain
-# game.)
+# CONTROL=1 first launches the **unmodified** Nightly (`CONTROL_GAME`, the launcher's control
+# export): every mod id must then be unknown, which is what proves the package supplied them.
 #
-# SELFTEST=1 flips C's expectation (the second town hall must be refused): a run that wrongly
-# accepted it must FAIL, proving the scenario can fail.
+# SELFTEST=1 inverts M's expected depth (9 blocks above the bedrock instead of 8): a miner that
+# stopped one block short must FAIL, proving the assertion can fail. FOUNDING_SELFTEST=1 flips
+# C's expectation instead (the second town hall must have been refused), the slice-1 leg.
 #
 # The game must be a build of `horizon-mod.toml`'s `[native]` pin: a native `.hmod`'s Rust is
 # compiled by the launcher against exactly that build, so a game built at another pin is not
@@ -45,6 +58,7 @@ export LC_ALL=C
 
 CONTROL=${CONTROL:-0}
 SELFTEST=${SELFTEST:-0}
+FOUNDING_SELFTEST=${FOUNDING_SELFTEST:-0}
 
 CLONE=${CLONE:-$(cd "$(dirname "$0")/../../.." && pwd)}
 PORT=$CLONE/ports/minecolonies
@@ -70,6 +84,24 @@ FLOOR=100
 SECOND=$((X0 + 120))
 FAR=$((X0 + 200))
 CONTROL_X=$((X0 + 100))
+# Slice 2: the colony's chest stands east of the hall; the two trees are north of it, their
+# trunks two and four blocks from where the second citizen is hired; the miner's column is the
+# one under the third citizen's own hire position (the miner digs straight down from its feet).
+CHEST_X=$((X0 + 10)); CHEST_Y=$((FLOOR + 1)); CHEST_Z=0
+TREE1_X=$((X0 + 4)); TREE1_Z=-1
+TREE2_X=$((X0 + 6)); TREE2_Z=-1
+TREE_BASE=$((FLOOR + 1))
+TREE_TOP=$((FLOOR + 5))
+# The miner digs straight down from the third hire's own feet (y = FLOOR + 1), so its shaft is the
+# arena's floor block at FLOOR and the seven under it, with bedrock eight blocks below.
+SHAFT_X=$((X0 + 4)); SHAFT_Z=0
+SHAFT_TOP=$FLOOR
+SHAFT_BOTTOM=$((FLOOR - 8))
+EXPECT_DEPTH=${EXPECT_DEPTH:-8}
+if [ "$SELFTEST" = 1 ]; then
+    # The counterfactual: a miner one block short must fail the depth assertion.
+    EXPECT_DEPTH=$((EXPECT_DEPTH + 1))
+fi
 
 command -v jq >/dev/null || { echo "missing jq (every assertion parses a ctl reply)" >&2; exit 1; }
 [ -x "$CTL" ] || { echo "missing horizon-ctl: $CTL" >&2; exit 1; }
@@ -105,16 +137,33 @@ cleanup() {
 }
 trap cleanup EXIT
 
-launch() { # launch [WORLD]
-    local world=${1:-$WORLD}
+launch() { # launch [WORLD] [GAME]
+    local world=${1:-$WORLD} game=${2:-$GAME}
     rm -f "$SOCK"
     cd "$SCRATCH"
-    local args=(--game "$GAME" --world "$world" --seed 20261105 --creative --headless
+    # No `--dev-mod`: the launcher-built game carries the package's code, assets and data.
+    # `--offscreen`, not `--headless`: phase N opens a crafting table's menu and clicks its slots,
+    # and a menu needs a screen (`horizon/docs/horizon-ctl-commands.md`; modularrouters' craft check
+    # measured the same requirement).
+    local args=(--game "$game" --world "$world" --seed 20261105 --creative --offscreen
                 --wait --resources "$RES")
-    args+=(--dev-mod "$PORT")
-    "$CTL" --socket "$SOCK" launch "${args[@]}" >/dev/null
+    # The control leg quits a game on this same socket and the relaunch of K happens seconds after
+    # a quit: give the old process time to let go, then retry rather than fail on a bound socket.
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        if "$CTL" --socket "$SOCK" launch "${args[@]}" >/dev/null 2>&1; then
+            break
+        fi
+        [ "$attempt" = 5 ] && fail "the game did not launch on $SOCK"
+        sleep 3
+        rm -f "$SOCK"
+    done
     ctl wait-ready 120
-    ctl wait 40
+    # An offscreen relaunch loads terrain more slowly than `wait-ready` promises, and a chat
+    # command typed while the server is still finishing is dropped: wait a little longer here, and
+    # `info` (and `line`, which every assertion goes through) re-sends rather than giving up on the
+    # first silent read.
+    ctl wait 60
 }
 
 # The newest chat line containing TEXT that arrived after the last line this script consumed,
@@ -203,9 +252,18 @@ place() { # place X Y Z ITEM [FLOOR_Y]
 # `/minecolonies colony info`: the new reply, in COLONY_LINE (the harvest counter tells it apart
 # from the founding notice, which also starts with "Colony").
 info() {
-    say "minecolonies colony info"
-    COLONY_LINE=$(line 'crops harvested') || fail "no /minecolonies colony info reply"
-    echo "  $COLONY_LINE" >&2
+    # A chat command typed while the server is still finishing a relaunch is dropped, and the
+    # reply then never comes: send it again rather than mistake a slow world for a silent mod.
+    local attempt
+    for attempt in 1 2 3 4 5 6 7 8; do
+        say "minecolonies colony info"
+        if COLONY_LINE=$(line 'crops harvested'); then
+            echo "  $COLONY_LINE" >&2
+            return 0
+        fi
+        ctl wait 40 >/dev/null 2>&1 || true
+    done
+    fail "no /minecolonies colony info reply"
 }
 harvested() { sed -n 's/.*citizens, \([0-9]\{1,\}\) crops harvested.*/\1/p' <<<"$COLONY_LINE"; }
 expect_line() { # expect_line PATTERN
@@ -229,11 +287,42 @@ expect_refused() { # expect_refused X Y Z PATTERN
 citizens() { ctl entities 64 minecolonies:citizen | jq '[.entities[] | select(.type == "minecolonies:citizen")] | length'; }
 citizen_pos() { ctl entities 64 minecolonies:citizen | jq -r '[.entities[] | select(.type == "minecolonies:citizen")][0].pos[0]' 2>/dev/null || true; }
 
+# The colony's counters, parsed from `/minecolonies colony info` (`info` sets COLONY_LINE).
+felled() { sed -n 's/.*, \([0-9]\{1,\}\) logs felled.*/\1/p' <<<"$COLONY_LINE"; }
+dug() { sed -n 's/.*, \([0-9]\{1,\}\) blocks mined.*/\1/p' <<<"$COLONY_LINE"; }
+
+# A block's id at a position, without its state properties (`minecraft:oak_leaves[distance=7,…]`
+# is `minecraft:oak_leaves`).
+block_id() { block_name "$1" "$2" "$3" | sed 's/\[.*//'; }
+
+# A block at a position is exactly ID.
+block_is() { [ "$(block_id "$1" "$2" "$3")" = "$4" ]; }
+
+# How many of ITEM the chest at the colony's store holds (`ctl container` lists its slots).
+chest_count() { # chest_count ITEM
+    ctl container "$CHEST_X" "$CHEST_Y" "$CHEST_Z" \
+        | jq -r --arg item "$1" '[.slots[]? | select(. != null and .item == $item) | .count] | add // 0'
+}
+
+# Wait up to MAX ticks in STEP-tick slices for a predicate to hold; then evaluate it once more so
+# the caller's `||` reports the real state. A bounded wait, never a poll loop around a build.
+await_ticks() { # await_ticks MAX STEP PREDICATE...
+    local max=$1 step=$2 waited=0
+    shift 2
+    while [ "$waited" -lt "$max" ]; do
+        if "$@" >/dev/null 2>&1; then return 0; fi
+        ctl wait "$step" >/dev/null
+        waited=$((waited + step))
+    done
+    "$@"
+}
+
 # The control: the same game with no `--dev-mod`, so every mod id must be unknown. A scenario
 # that cannot fail is not evidence, and this leg is what proves the ids came from the package.
 control_leg() {
-    echo "== control: the same game without --dev-mod =="
-    launch "$CONTROL_WORLD"
+    echo "== control: the same Nightly without the package =="
+    [ -n "${CONTROL_GAME:-}" ] || fail "CONTROL=1 needs CONTROL_GAME (the unmodified Nightly: launcher-game.sh env <mod>)"
+    launch "$CONTROL_WORLD" "$CONTROL_GAME"
     arena
     ctl command "item replace entity @s hotbar.0 with minecolonies:blockhuttownhall 1" >/dev/null || true
     ctl wait 4 >/dev/null
@@ -244,8 +333,9 @@ control_leg() {
     local name
     name=$(block_name "$((X0 + 6))" $((FLOOR + 1)) 0)
     [ "$name" = "minecraft:air" ] || fail "the control game holds $name, so the block id was known"
-    echo "  without --dev-mod: no town hall item, the block stayed $name"
+    echo "  without the package: no town hall item, the block stayed $name"
     ctl quit >/dev/null 2>&1 || true
+    sleep 3
 }
 
 # The scenario's core, used by every leg.
@@ -271,7 +361,7 @@ founding_and_first_room() {
 
     echo "== C: a second town hall 120 blocks away is refused =="
     place_attempt "$SECOND" $((FLOOR + 1)) 0
-    if [ "$SELFTEST" = 1 ]; then
+    if [ "$FOUNDING_SELFTEST" = 1 ]; then
         echo "(selftest: the second town hall must have been placed)"
         [ "$(block_name "$SECOND" $((FLOOR + 1)) 0)" = "minecolonies:blockhuttownhall" ] \
             || fail "selftest: the second town hall was refused, as it should be"
@@ -283,7 +373,7 @@ founding_and_first_room() {
     # 120 across and 120 up is 170 blocks in 3D (upstream's `BlockPosUtil.getDistance`), so
     # upstream allows this site; the colony is a 2D claim and the port refuses it.
     raised_attempt "$SECOND" $((FLOOR + 120)) 0
-    if [ "$SELFTEST" = 1 ]; then
+    if [ "$FOUNDING_SELFTEST" = 1 ]; then
         echo "(selftest: the raised town hall must have been placed)"
         [ "$(block_name "$SECOND" $((FLOOR + 201)) 0)" = "minecolonies:blockhuttownhall" ] \
             || fail "selftest: the raised town hall was refused, as it should be"
@@ -293,7 +383,7 @@ founding_and_first_room() {
 
     echo "== E: a town hall 200 blocks away is refused: the player already owns a colony =="
     place_attempt "$FAR" $((FLOOR + 1)) 0
-    if [ "$SELFTEST" = 1 ]; then
+    if [ "$FOUNDING_SELFTEST" = 1 ]; then
         echo "(selftest: the far town hall must have been placed)"
         [ "$(block_name "$FAR" $((FLOOR + 1)) 0)" = "minecolonies:blockhuttownhall" ] \
             || fail "selftest: the far town hall was refused, as it should be"
@@ -320,6 +410,13 @@ place_attempt() { # place_attempt X Y Z [AIM_Y [FACE]]
     local x=$1 y=$2 z=$3 aim face
     aim=${4:-$((y - 1))}
     face=${5:-up}
+    # Teleport first: it loads the chunks, which a far `/fill` slice may have missed.
+    ctl command "execute in minecraft:the_end run tp @s $((x - 2)).5 $y $z.5" >/dev/null
+    ctl wait 12 >/dev/null
+    # Then give the player a stand and the target a support, and stand on it.
+    ctl command "execute in minecraft:the_end run setblock $((x - 2)) $((y - 1)) $z minecraft:stone" >/dev/null
+    ctl command "execute in minecraft:the_end run setblock $x $((y - 1)) $z minecraft:stone" >/dev/null
+    ctl wait 6 >/dev/null
     ctl command "execute in minecraft:the_end run tp @s $((x - 2)).5 $y $z.5" >/dev/null
     ctl wait 6 >/dev/null
     hold minecolonies:blockhuttownhall 64
@@ -393,17 +490,26 @@ job_ticks() {
     ctl wait 160 >/dev/null
     info
     local after_harvest near_age
+    ctl chat "/data get entity @e[type=minecolonies:citizen,limit=1]" >/dev/null; ctl wait 3 >/dev/null
+    ctl chat "/data get block $X0 $((FLOOR + 1)) 0" >/dev/null; ctl wait 3 >/dev/null
     after_harvest=$(harvested)
     near_age=$(crop_age $((X0 + 4)) $((FLOOR + 2)) 0)
     [ "$near_age" = 0 ] || fail "the near crop is still age $near_age, not replanted at 0"
     [ "${after_harvest:-0}" -ge 1 ] || fail "the colony counted no harvest (${before_harvest:-0} -> ${after_harvest:-0})"
     echo "  harvested ${before_harvest:-0} -> $after_harvest, near crop age 7 -> $near_age" >&2
     ctl wait 400 >/dev/null
-    local after_pos far_age
+    local after_pos far_age far_harvest
     after_pos=$(citizen_pos)
     far_age=$(crop_age $((X0 + 7)) $((FLOOR + 2)) 1)
-    [ "$far_age" = 0 ] || fail "the far crop is still age $far_age: the farmer never reached it"
-    echo "  citizen $before_pos -> $after_pos, far crop age 7 -> $far_age" >&2
+    info
+    far_harvest=$(harvested)
+    # The far crop is harvested (age 0) and wheat grows again on its own, so the assertion is
+    # that it is no longer mature *and* that the colony counted a second harvest. A farmer that
+    # never reached it leaves both at 7 and 1.
+    [ "${far_age:-7}" -lt 7 ] || fail "the far crop is still age $far_age: the farmer never reached it"
+    [ "${far_harvest:-0}" -ge 2 ] \
+        || fail "the colony counted ${far_harvest:-0} harvest(s), so the far crop was not harvested"
+    echo "  citizen $before_pos -> $after_pos, far crop age 7 -> $far_age, harvested $after_harvest -> $far_harvest" >&2
     [ "$before_pos" != "$after_pos" ] || fail "the citizen never moved: $before_pos"
     echo "  the job ticks in the world: a crop changed and the citizen walked"
 }
@@ -462,6 +568,225 @@ persistence() {
     echo "  after the relaunch: $before -> $(harvested) harvested, roster intact" >&2
 }
 
+# A tree from the mod's own world data: a four-high oak trunk standing on dirt with a leaves cap
+# (the brief's own shape). `tree_stands X Z` is the predicate the counterfactual waits on.
+plant_tree() { # plant_tree X Z
+    local x=$1 z=$2 y
+    ctl command "execute in minecraft:the_end run setblock $x $TREE_BASE $z minecraft:dirt" >/dev/null
+    for y in $((TREE_BASE + 1)) $((TREE_BASE + 2)) $((TREE_BASE + 3)) $TREE_TOP; do
+        ctl command "execute in minecraft:the_end run setblock $x $y $z minecraft:oak_log" >/dev/null
+    done
+    # `persistent=true`: a leaf that decays on its own would make "the leaves are still there"
+    # unprovable; a persistent cap only vanishes if something breaks it.
+    ctl command "execute in minecraft:the_end run setblock $x $((TREE_TOP + 1)) $z minecraft:oak_leaves[persistent=true]" >/dev/null
+    ctl wait 6 >/dev/null
+    local log
+    for log in $((TREE_BASE + 1)) $((TREE_BASE + 2)) $((TREE_BASE + 3)) $TREE_TOP; do
+        block_is "$x" "$log" "$z" minecraft:oak_log || fail "the tree at $x,$z has no log at y=$log"
+    done
+    block_is "$x" $((TREE_TOP + 1)) "$z" minecraft:oak_leaves || fail "the tree at $x,$z has no leaves cap"
+}
+
+# The whole tree still stands (the unemployed counterfactual, and the tree after it was felled).
+tree_stands() { # tree_stands X Z
+    local x=$1 z=$2 y
+    for y in $((TREE_BASE + 1)) $((TREE_BASE + 2)) $((TREE_BASE + 3)) $TREE_TOP; do
+        block_is "$x" "$y" "$z" minecraft:oak_log || return 1
+    done
+    block_is "$x" $((TREE_TOP + 1)) "$z" minecraft:oak_leaves
+}
+
+tree_gone() { # tree_gone X Z — every log cell air, the leaves cap standing
+    local x=$1 z=$2 y
+    for y in $((TREE_BASE + 1)) $((TREE_BASE + 2)) $((TREE_BASE + 3)) $TREE_TOP; do
+        block_is "$x" "$y" "$z" minecraft:air || return 1
+    done
+    block_is "$x" $((TREE_TOP + 1)) "$z" minecraft:oak_leaves
+}
+
+# The tree dropped: the logs above the stump are air, the stump's own cell is air or the sapling
+# replanted in it, and the leaves cap still stands (a lumberjack is not a leaf-breaker).
+tree_felled() { # tree_felled X Z
+    local x=$1 z=$2 y stump
+    for y in $((TREE_BASE + 2)) $((TREE_BASE + 3)) $TREE_TOP; do
+        block_is "$x" "$y" "$z" minecraft:air || return 1
+    done
+    stump=$(block_id "$x" $((TREE_BASE + 1)) "$z")
+    case "$stump" in
+        minecraft:air | minecraft:oak_sapling) ;;
+        *) return 1 ;;
+    esac
+    block_is "$x" $((TREE_TOP + 1)) "$z" minecraft:oak_leaves
+}
+
+# A citizen hired into the colony; its position is the hall's spawn pattern, so the phase's tree
+# and column are placed where its own hire position puts it. The roster count is the colony's own
+# saved record (`colony info`); the live mobs are counted by the caller when the player stands
+# beside the hall, because `ctl entities`' radius is measured from the player.
+hire() { # hire NAME EXPECTED_ROSTER
+    say "minecolonies citizen hire $1"
+    ctl wait 20 >/dev/null
+    local joined
+    joined=$(line 'joined') || fail "no 'joined' line after hiring $1"
+    echo "  $joined" >&2
+    info
+    expect_line " $2 citizens"
+}
+
+# Stand the player by the hall so the client tracks its citizens within `ctl entities`' radius.
+stand_by_the_hall() {
+    ctl command "execute in minecraft:the_end run tp @s $((X0 + 2)).5 $((FLOOR + 1)) -3.5" >/dev/null
+    ctl wait 20 >/dev/null
+}
+
+assign_job() { # assign_job NAME JOB NEEDLE
+    say "minecolonies job assign $1 $2"
+    ctl wait 12 >/dev/null
+    local line
+    line=$(line "$3") || fail "no assignment line for $1 as $2"
+    echo "  $line" >&2
+    grep -q "$2" <<<"$line" || fail "the assignment line is not a $2: $line"
+}
+
+lumberjack_job() {
+    echo "== L: a lumberjack fells whole trees, leaves the leaves, and replants from the chest =="
+    stand_by_the_hall
+    ctl command "execute in minecraft:the_end run setblock $CHEST_X $CHEST_Y $CHEST_Z minecraft:chest" >/dev/null
+    ctl wait 6 >/dev/null
+    block_is "$CHEST_X" "$CHEST_Y" "$CHEST_Z" minecraft:chest || fail "the colony's chest did not place"
+    # The first tree has a sapling waiting in the colony's chest; the second has none.
+    ctl container "$CHEST_X" "$CHEST_Y" "$CHEST_Z" minecraft:oak_sapling 1 >/dev/null
+    ctl wait 4 >/dev/null
+    [ "$(chest_count minecraft:oak_sapling)" = 1 ] || fail "the chest did not take the sapling"
+    plant_tree "$TREE1_X" "$TREE1_Z"
+    info
+    local felled_before dug_before
+    felled_before=$(felled); dug_before=$(dug)
+    [ -n "$felled_before" ] || fail "the colony line has no felled counter: $COLONY_LINE"
+
+    # Bo is hired but NOT employed: the tree must stay whole (the counterfactual).
+    hire Bo 2
+    [ "$(citizens)" = 2 ] || fail "expected 2 live citizens after hiring Bo, found $(citizens)"
+    ctl wait 200 >/dev/null
+    tree_stands "$TREE1_X" "$TREE1_Z" || fail "an unemployed citizen felled the tree at $TREE1_X,$TREE1_Z"
+    echo "  the unemployed citizen left the tree whole (4 logs and the leaves stand)" >&2
+
+    assign_job Bo lumberjack lumberjack
+    # Four logs, one per work step, and the walk that may precede them.
+    if ! await_ticks 600 40 tree_felled "$TREE1_X" "$TREE1_Z"; then
+        info
+        fail "the lumberjack did not fell the tree at $TREE1_X,$TREE1_Z"
+    fi
+    local y
+    for y in $((TREE_BASE + 2)) $((TREE_BASE + 3)) $TREE_TOP; do
+        [ "$(block_id "$TREE1_X" "$y" "$TREE1_Z")" = "minecraft:air" ] \
+            || fail "log $TREE1_X,$y,$TREE1_Z is not air after the fell"
+    done
+    block_is "$TREE1_X" $((TREE_TOP + 1)) "$TREE1_Z" minecraft:oak_leaves \
+        || fail "the lumberjack broke the leaves cap at $TREE1_X,$((TREE_TOP + 1)),$TREE1_Z"
+    echo "  after the fell: soil at $TREE1_X,$TREE_BASE,$TREE1_Z is '$(block_name "$TREE1_X" "$TREE_BASE" "$TREE1_Z")', stump is '$(block_name "$TREE1_X" $((TREE_BASE + 1)) "$TREE1_Z")', chest $(ctl container "$CHEST_X" "$CHEST_Y" "$CHEST_Z" | jq -c '[.slots[]? | select(. != null)]')" >&2
+    block_is "$TREE1_X" "$TREE_BASE" "$TREE1_Z" minecraft:dirt \
+        || fail "the stump's soil is '$(block_name "$TREE1_X" "$TREE_BASE" "$TREE1_Z")', not dirt"
+    block_is "$TREE1_X" $((TREE_BASE + 1)) "$TREE1_Z" minecraft:oak_sapling \
+        || fail "no sapling on the stump's soil although the chest held one: '$(block_name "$TREE1_X" $((TREE_BASE + 1)) "$TREE1_Z")'"
+    [ "$(chest_count minecraft:oak_log)" = 4 ] \
+        || fail "the colony's chest holds $(chest_count minecraft:oak_log) oak_log, not 4"
+    [ "$(chest_count minecraft:oak_sapling)" = 0 ] || fail "the replanted sapling was not taken from the chest"
+    info
+    [ "$(felled)" = "$((felled_before + 4))" ] \
+        || fail "the colony counted $(felled) logs felled, not $((felled_before + 4))"
+    echo "  4 logs air, leaves intact, 4 oak_log in the chest, a sapling on the stump's soil" >&2
+
+    # The second tree, with no sapling in the chest: felled the same way, its soil left bare.
+    plant_tree "$TREE2_X" "$TREE2_Z"
+    if ! await_ticks 600 40 tree_gone "$TREE2_X" "$TREE2_Z"; then
+        info
+        fail "the lumberjack did not fell the second tree at $TREE2_X,$TREE2_Z"
+    fi
+    block_is "$TREE2_X" $((TREE_BASE + 1)) "$TREE2_Z" minecraft:air \
+        || fail "a sapling appeared without one in the chest"
+    [ "$(chest_count minecraft:oak_log)" = 8 ] \
+        || fail "the colony's chest holds $(chest_count minecraft:oak_log) oak_log after two trees, not 8"
+    info
+    [ "$(felled)" = "$((felled_before + 8))" ] || fail "the colony counted $(felled) logs felled, not $((felled_before + 8))"
+    [ "$(dug)" = "$dug_before" ] || fail "the lumberjack changed the dug counter"
+    echo "  the second tree fell too, its soil bare (no sapling in the chest), 8 logs in all" >&2
+}
+
+# The miner's column: eight stone over bedrock, under the third citizen's own hire position.
+miner_column() {
+    ctl command "execute in minecraft:the_end run setblock $SHAFT_X $SHAFT_BOTTOM $SHAFT_Z minecraft:bedrock" >/dev/null
+    ctl command "execute in minecraft:the_end run fill $SHAFT_X $((SHAFT_BOTTOM + 1)) $SHAFT_Z $SHAFT_X $SHAFT_TOP $SHAFT_Z minecraft:stone" >/dev/null
+    ctl wait 6 >/dev/null
+    block_is "$SHAFT_X" "$SHAFT_BOTTOM" "$SHAFT_Z" minecraft:bedrock || fail "the shaft's bedrock did not place"
+    block_is "$SHAFT_X" "$SHAFT_TOP" "$SHAFT_Z" minecraft:stone || fail "the shaft's top block did not place"
+}
+
+column_whole() { # column_whole DEPTH — the DEPTH blocks above the bedrock are stone
+    local depth=$1 i
+    for i in $(seq 0 $((depth - 1))); do
+        block_is "$SHAFT_X" $((SHAFT_TOP - i)) "$SHAFT_Z" minecraft:stone || return 1
+    done
+}
+
+column_air() { # column_air DEPTH — the DEPTH blocks above the bedrock read air
+    local depth=$1 i
+    for i in $(seq 0 $((depth - 1))); do
+        block_is "$SHAFT_X" $((SHAFT_TOP - i)) "$SHAFT_Z" minecraft:air || return 1
+    done
+}
+
+miner_job() {
+    echo "== M: a miner sinks a 1x1 shaft to the bedrock and collects every drop =="
+    miner_column
+    # The third hire stands over the column (`spawn_point` puts it at the hall's x+4.5).
+    stand_by_the_hall
+    hire Cass 3
+    [ "$(citizens)" = 3 ] || fail "expected 3 live citizens after hiring Cass, found $(citizens)"
+    ctl wait 200 >/dev/null
+    column_whole 8 || fail "an unemployed citizen dug the column at $SHAFT_X,$SHAFT_Z"
+    echo "  the unemployed citizen left the 8-block column whole" >&2
+
+    assign_job Cass miner miner
+    local depth=${EXPECT_DEPTH:-8}
+    if ! await_ticks 900 40 column_air "$depth"; then
+        info
+        fail "the miner did not dig $depth blocks above the bedrock at $SHAFT_X,$SHAFT_Z"
+    fi
+    column_air "$depth" || fail "the shaft is not $depth blocks of air"
+    block_is "$SHAFT_X" "$SHAFT_BOTTOM" "$SHAFT_Z" minecraft:bedrock || fail "the miner broke the bedrock"
+    # 1x1: the four blocks beside the shaft at its top are still the arena's stone floor.
+    block_is $((SHAFT_X - 1)) "$SHAFT_TOP" "$SHAFT_Z" minecraft:stone || fail "the shaft is not 1x1 (west)"
+    block_is $((SHAFT_X + 1)) "$SHAFT_TOP" "$SHAFT_Z" minecraft:stone || fail "the shaft is not 1x1 (east)"
+    block_is "$SHAFT_X" "$SHAFT_TOP" $((SHAFT_Z - 1)) minecraft:stone || fail "the shaft is not 1x1 (north)"
+    block_is "$SHAFT_X" "$SHAFT_TOP" $((SHAFT_Z + 1)) minecraft:stone || fail "the shaft is not 1x1 (south)"
+    [ "$(chest_count minecraft:cobblestone)" = 8 ] \
+        || fail "the colony's chest holds $(chest_count minecraft:cobblestone) cobblestone, not 8"
+    info
+    [ "$(dug)" = 8 ] || fail "the colony counted $(dug) blocks mined, not 8"
+    echo "  the shaft is 1x1 and $depth deep, the bedrock untouched, 8 cobblestone in the chest" >&2
+}
+
+# Every carried recipe, crafted the way it declares; every carried item read back; an unknown id
+# refused. The old `data/` was never exercised: a recipe that is never crafted is dead data.
+craft_and_items() {
+    echo "== N: the carried recipes craft, and the carried items are real ids =="
+    python3 "$PORT/tools/craft_check.py" "$SOCK" "$CTL" $((X0 + 14)) $((FLOOR + 1)) 0 \
+        || fail "a carried recipe did not craft its declared id and count"
+    ctl command "clear @s" >/dev/null
+    ctl wait 4 >/dev/null
+    ctl command "give @s minecolonies:scythe 1" >/dev/null
+    ctl wait 6 >/dev/null
+    local held
+    held=$(ctl inventory | jq '[.hotbar[], .main[] | select(.item == "minecolonies:scythe")] | length')
+    [ "$held" = 1 ] || fail "the scythe is not an item the game knows ($held in the inventory)"
+    ctl command "give @s minecolonies:no_such_item 1" >/dev/null
+    local refused
+    refused=$(line 'Unknown item') || fail "an unknown minecolonies id was not refused"
+    echo "  the scythe is real, an unknown id is refused: $refused" >&2
+    echo "  every carried recipe crafted its id and count in a real table" >&2
+}
+
 echo "== launch (The End arena) =="
 if [ "$CONTROL" = 1 ]; then control_leg; fi
 launch
@@ -472,5 +797,8 @@ citizen_and_job
 job_ticks
 no_colony_control
 persistence
+lumberjack_job
+miner_job
+craft_and_items
 
-echo "PASS: the town hall founded a persisted colony (name, owner, 64-block radius), a second hall was refused when too close (including 120 blocks across and 120 up) and when the owner had one already, a citizen joined, took the farmer's job, harvested a mature crop and walked to the next, a citizen with no colony did nothing, and the colony and its job survived quit and relaunch"
+echo "PASS: the town hall founded a persisted colony (name, owner, 64-block radius), a second hall was refused when too close (including 120 blocks across and 120 up) and when the owner had one already, a citizen joined, took the farmer's job, harvested a mature crop and walked to the next, a citizen with no colony did nothing, the colony and its job survived quit and relaunch, a lumberjack felled two whole four-log trees (leaves untouched, 4 logs in the colony's chest each, a sapling replanted only when the chest held one) while an unemployed citizen left its tree whole, and a miner sank a 1x1 8-block shaft to the bedrock (bedrock and its neighbours untouched, 8 cobblestone in the chest) while an unemployed citizen left its column whole, and all three carried recipes crafted their id and count in a real table with two wrong-ingredient controls that crafted nothing"

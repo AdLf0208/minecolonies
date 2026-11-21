@@ -1,4 +1,4 @@
-# MineColonies — slice 1: town hall → colony → one citizen → one job
+# MineColonies — slices 1–2: town hall → colony → citizens → farmer, lumberjack, miner
 
 **Class:** `content` · **Tier:** `deep` · **Role:** core · **Priority:** P0 · in ATM10.
 Ported from **MineColonies** `1.1.1411-1.21.1-snapshot`, jar
@@ -7,10 +7,10 @@ Ported from **MineColonies** `1.1.1411-1.21.1-snapshot`, jar
 upstream `ldtteam/minecolonies` branch `version/main`, commit
 `3438c06fc92947b28bbd2fda29f00e207b967a22`.
 
-**Format (2026-11-18):** the flat **SDK package** (mod API `0.2`), version **0.2.0** — one
+**Format (2026-11-18):** the flat **SDK package** (mod API `0.2`), version **0.2.4** — one
 `.hmod` carrying `horizon-mod.toml`, `src/`, `assets/`, `data/` and the licence files. Pin:
-Horizon **`0b14f8acfd97fa2c750e42795249dcc981178ca4`** (Nightly 2026-11-18), horizon-mixins
-**`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`**, SDK surface `72aaa95c…`, package format 6.
+Horizon **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** (Nightly 2026-11-20), horizon-mixins
+**`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`**, SDK surface `e0563779…`, package format 6.
 The retired `.hnmod` (0.1.1, submission **#951**) is archived under
 `ports/_shared/evidence/minecolonies/legacy/`; §"Migration to the SDK format" is the recipe.
 
@@ -42,6 +42,84 @@ a mature crop inside the colony, harvests it and leaves it replanted, counting t
 survive `quit` and a relaunch. Chosen because it is the mod's core and provable in the harness:
 `docs/modpacks.md`'s `deep` tier is "entities and AI, block entities, new hooks", and this slice is
 exactly one block entity, one entity and one tick.
+
+### Slice 2 — `lumberjack` and `miner` (0.2.2 → 0.2.4)
+
+The gap line this slice comes from (`## Gaps`, as it stood before it):
+
+> The other ~40 jobs (builder, miner, guard, crafter, …), the builder and its schematics
+> (`blueprints/**`), …
+
+Two more jobs, chosen because they differ in **target selection and world action** — a tree to fell
+and replant, a shaft to sink and collect — so the roster tick, the assignment surface and the
+colony record generalise instead of being a farmer special case. Not the builder: its
+`blueprints/**` are jar content and this port may not carry art, and it needs a schematic format
+this slice does not have. No renderer, no entity model, no new SDK hook.
+
+Required behaviour, from upstream's own data and its job rules (implemented, not copied):
+
+| Rule | Source |
+|---|---|
+| The jobs' ids are `lumberjack` and `miner` | `assets/minecolonies/lang/en_us.json`: `com.minecolonies.job.lumberjack` (labelled *Forester*), `com.minecolonies.job.miner` |
+| A lumberjack "cuts down trees and replants them"; a miner "mines out a shaft system under the colony, gathering blocks and ores" | `minecolonies:lumberjack.job.desc`, `minecolonies:miner.job.desc` (same file) |
+| One work step per **40** ticks at skill 0, the farmer's `max(1, 40 - skill / 2)` shape | `EntityAIWorkFarmer.java:85,692`; every job at skill 0 in this slice |
+| A worker acts on what it can reach without another step (2.5 blocks) and walks 0.6 per step | the farmer's own reach and stride, `runtime::FARMER_REACH`/`STRIDE` |
+| A tree is its **connected log cluster**; leaves are not logs | `minecraft:logs` at 26.3 is `*_log`/`*_wood`/`*_stem`/`*_hyphae` (`block-tags.json`); the SDK has no block-tag query, so the id is the rule |
+| The stump's soil gets a sapling back | "replants them"; a stripped trunk replants its family, the Nether's stems grow fungi |
+| Bedrock is never mined, a shaft is never opened into water or lava, and a miner never works outside its colony | "a dangerous job": the shaft is the colony's, `Level.destroyBlock` is only called on a legal block (`runtime::miner_next`) |
+
+**TDD, in the order the ruling asks for.** The rules live in `runtime.rs` (pure), so the failing
+tests came first — 17 of them, with the three new rules as `unimplemented!()` bodies:
+
+```
+$ cargo test --offline
+not implemented: the tree's connected cluster
+---- runtime::tests::a_tree_is_felled_from_the_top stdout ----
+thread 'runtime::tests::a_tree_is_felled_from_the_top' panicked at src/runtime.rs:620:5
+...
+test result: FAILED. 41 passed; 14 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+(`ports/_shared/evidence/minecolonies/sdk-test-slice2-red.log`; the 14 include the record's two new
+counters and the field-set table, which the same red run pins.) Then the rules, the glue and the
+in-game assertions; `sdk-test.log` is the green run of the same 55 tests.
+
+**What the two jobs do on one work tick** (`support::lumberjack_work`, `support::miner_work`):
+
+- **Lumberjack.** The nearest log inside the colony within 16 blocks is the seed of
+  `runtime::tree_at` (a six-neighbour flood fill of the same block, capped at 64 logs and a 32/8
+  vertical window). It walks to the next log and fells the **highest** one, so the trunk is never
+  left hanging over the cut; the drops go into the colony's chest at the level's `level_tick_post`
+  (a block-entity write inside a tick is overwritten by that entity's own write-back), and the
+  colony counts each log. When the last log falls it takes **one sapling of that tree** from the
+  chest and plants it on the stump's soil — only if the soil grows one and the cell is free. With
+  no sapling in the chest the soil is left bare.
+- **Miner.** `runtime::miner_next` scans the one column under the miner from its feet down to the
+  level's floor: the first non-air block is the next to dig, so a shaft already dug is not re-dug
+  and no state has to be saved. It stops at `minecraft:bedrock`, at a fluid, at the world floor and
+  outside the colony. Each block is `LevelRef::destroy_block(drop, collect)` — the level's own drop
+  path — and its stacks go to the chest, counted as "blocks mined".
+
+**The harness's two assertions** (`tools/e2e.sh` L and M, at `0a875da`):
+
+```
+== L: a lumberjack fells whole trees, leaves the leaves, and replants from the chest ==
+  the unemployed citizen left the tree whole (4 logs and the leaves stand)
+  Bo is now the colony's lumberjack.
+  after the fell: soil at 2004,101,-1 is 'minecraft:dirt', stump is 'minecraft:oak_sapling',
+    chest [{"count":4,"item":"minecraft:oak_log"}]
+  the second tree fell too, its soil bare (no sapling in the chest), 8 logs in all
+== M: a miner sinks a 1x1 shaft to the bedrock and collects every drop ==
+  the unemployed citizen left the 8-block column whole
+  Cass is now the colony's miner.
+  the shaft is 1x1 and 8 deep, the bedrock untouched, 8 cobblestone in the chest
+```
+
+Both phases carry their own counterfactual **before** the assignment (an unemployed citizen beside
+the same tree / column, which stays whole), and the miner's depth is inverted by `SELFTEST=1`
+(expecting 9 blocks over the bedrock, so a miner one block short fails). The lumberjack's sapling
+rule is proved **both ways** in one run: tree 1 with a sapling in the chest is replanted, tree 2
+without one is left bare.
 
 ### Behaviour, and where it was read
 
@@ -237,6 +315,30 @@ cargo output.
   where upstream reads a farm field's crop list; the observable behaviour (walk, harvest, replant)
   is the same at this depth.
 - Art placeholders: the farmer's hut is a half-height box and the scythe two crossed planes.
+- **New in 0.2.2 (slice 2):** the two new jobs need **no building**. Upstream gives every job a
+  building (`JobLumberjack`/`BuildingLumberjack`, `JobMiner`/`BuildingMiner`), but this port has no
+  lumberjack's hut or mine block — only the farmer's hut exists — so `Job::building()` answers
+  `Some(FARMER_HUT)` for the farmer alone and the two new jobs are assignable without one. The
+  rule (and its code path) is in place for when those blocks arrive; adding them is content, not
+  behaviour, and their `blueprints/**` are jar art this port may not carry.
+- **New in 0.2.2 (slice 2):** a citizen has no inventory of its own, so the **colony's chest is its
+  store**: the nearest `minecraft:chest` inside the colony within 16 blocks of the worker is where
+  a lumberjack's logs and a miner's cobblestone go, and where the sapling a felled tree is
+  replanted with comes from. Upstream delivers to the worker's own building's rack; this slice has
+  no building racks, and a chest is the observable store the harness can assert (`ctl container`).
+  The drops are applied at `level_tick_post`, as a delta on the chest, because a block-entity
+  write made during a tick is overwritten by that entity's own write-back.
+- **New in 0.2.2 (slice 2):** the lumberjack fells **top-down**, which upstream does too; the
+  miner's shaft depth is **derived from the world** (the first non-air block under its feet) rather
+  than saved, so a relaunch resumes at the right depth without state.
+- **New in 0.2.2 (slice 2):** "never into water/lava" is decided by the block id
+  (`minecraft:water`, `minecraft:lava`, `minecraft:bubble_column`, and any id ending `_water`/
+  `_lava`/`:water`/`:lava`), not by a fluid-state query: a mod fluid with another name would be
+  treated as diggable. The pin exposes fluid states, but a shaft that stops at the two fluids the
+  mod's own era had is what the rule states.
+- **New in 0.2.2 (slice 2):** the lumberjack breaks one log per work tick (upstream's tree felling
+  is also block by block), so a four-log tree takes four steps; the harness waits for the tree to
+  drop rather than for a fixed tick count.
 - **New in 0.2.0 (migration):** the colony is saved by an attachment codec rather than as a
   `Colony` compound inside the block entity's own saved data. The record, its field names and the
   mapping are unchanged (`colony_fields`/`colony_from_fields`), and the attachment is stored on
@@ -267,78 +369,174 @@ is MineColonies' parent mod and is not ported here, so the recipe could never ma
 vanilla ingredients (planks + a crafting table; planks + an iron hoe; iron ingots + sticks), which
 is recorded here rather than shipped broken.
 
+## Carried data fixed (2026-11-21, the `constructionstick` class)
+
+**The scythe recipe was shadowed by vanilla's iron hoe and could never be crafted.**
+`data/minecolonies/recipe/scythe.json` was `["II ", " S ", " S "]` — two iron over a two-stick
+shaft — which is **exactly** 26.3's `minecraft:iron_hoe` recipe. Measured in game 2026-11-21: a
+correctly built 2×3 grid of two iron ingots and two sticks at the crafting table produced
+`{"count":1,"item":"minecraft:iron_hoe","slot":200}` instead of the scythe, so the item the port
+ships was unobtainable (`e2e-launcher.log`, phase N's red run in the wave's log). **The port moves
+an ingredient, same ingredients and same result**: the blade now has a gap (`["I I"," S "," S "]`),
+a shape no vanilla recipe owns, and `tools/craft_check.py` crafts it, asserts the id and count,
+shift-clicks it into the inventory, and asserts the grid emptied and the iron was consumed — with
+two wrong-ingredient controls that must craft nothing. The town hall and the farmer's hut recipes
+were **already** craftable (asserted in the same phase). Not an upstream report: upstream's scythe
+is not a crafting-table recipe at all (the jar carries none — the builder's `crafterrecipes` make
+tools), so the collision came from this port's own vanilla substitution.
+
+## Coverage — every family this port carries, and what is left
+
+The table is the record the parity rule asks for: a family is `tested` in game through
+`horizon-ctl` (phase in `tools/e2e.sh`), `not ported` (upstream has it, this slice does not), or
+`blocked(<gap>)`. `python3 ports/tools/check-coverage.py minecolonies` reads it.
+
+| Family | Status | Evidence / reason |
+|---|---|---|
+| `minecolonies:blockhuttownhall` | tested | A: placed from the held item, founds the colony, `colony info` reads it back; C–E: refused placements leave air; the block and its item share the id |
+| `minecolonies:blockhutfarmer` | tested | F: placed; H: `job info` reports it as the farmer's building; the block and its item share the id |
+| `minecolonies:blocks/blockhuttownhall` | tested | A: the block's own loot table (the declared shape; the block has no `requires_tool`, so a hand break drops it) |
+| `minecolonies:blocks/blockhutfarmer` | tested | F: same declared shape, same tag (`minecraft:mineable/axe`, carried by `data/minecraft/tags/block/mineable/axe.json`) |
+| `minecolonies:entities/citizen` | tested | G/M: hired, counted live, and the roster is read back; the citizen entity type is what the hire spawns |
+| `minecolonies:scythe` | tested | N: crafted in a real table, read back from the inventory; the recipe is the same id |
+| `block_entity` | tested | A/B/K: the town hall's block entity holds the colony attachment, which round-trips and survives a relaunch; F/H: the farmer's hut's marker is found by `has_farmers_hut`. Both types are declared in code (`Registrar::block_entity_type`), not in `data/`, which is why the tool sees no id for them |
+| `*` | not ported | everything else the jar carries: the other ~92 blocks and ~236 items, the other ~35 jobs, the research tree (`data:researches`), crafter recipes, colony/visitor/name data, the other 150 loot tables, the recipes the port does not carry, the item/block/entity tags, and the world-gen families (`worldgen:structure`, `worldgen:structure_set`, `worldgen:template_pool`, `worldgen:processor_list`, `tag:worldgen`). The builder's `blueprints/**` are jar **art** and may not be carried at all (`blocked(jar-assets)`). The gap list below is the prose form of this row. |
+
+The commands (`colony info/rename/radius`, `citizen hire/list`, `job assign/info`) are not a family
+the tool inventories; every one of them is called and its **parsed** reply asserted in the leg
+(A, B, G, H, I, L, M), and an unknown job is refused by name.
+
 ## Gaps (stated, not hidden)
 
 Content and behaviour, unchanged from 0.1.1:
 
-- The other ~40 jobs (builder, miner, guard, crafter, …), the builder and its schematics
+- The other ~35 jobs (builder, guard, crafter, cook, …), the builder and its schematics
   (`blueprints/**`), the research tree (`data/minecolonies/researches/**`), the colony/citizen UI,
   happiness, saturation, the request system, raids, permissions and ranks, colony size growth from
   buildings, worldgen colonies, and the colony registry across unloaded chunks.
 - The citizen's own model and texture (a native renderer slice); the scythe is a plain item with no
   harvest behaviour of its own (the job does the harvesting).
-- The colony banner, the supply camp/ship, and every other block of the mod.
+- The colony banner, the supply camp/ship, every other block of the mod, and the **buildings the new
+  jobs would need** (a lumberjack's hut, a mine): the jobs themselves are ported and asserted, the
+  two blocks are not (see the deviations).
 
-Introduced or left open by the migration:
+Introduced or left open by the migration — **closed at 0.2.4 (2026-11-21)**: the game binary at
+the campaign pin now exists and the leg ran, so the attachment **codec persistence across a
+relaunch** (K), the **block entity holder** for a content-declared block (A/B), the hall Part
+driving the roster (G–M) and the launcher compiling `src/` from the package directory (every
+launch) are all transcripts, not compile-level claims. What remains open:
 
-- **Not verified in game at this pin.** No game binary exists at `0b14f8a` (the shared pairs are
-  `41f822b6` and `1d63e0a5`), so no `horizon-ctl` transcript exists for 0.2.0. Everything below is
-  compile-, check- and test-level evidence only: the attachment **codec persistence across a
-  relaunch**, the **block entity holder** existing for a content-declared block (the declaration is
-  the SDK's mechanism), `general_entity_tick` firing for a **content-declared** entity type, and
-  `--dev-mod <package directory>` making the launcher compile `src/` (the e2e's launch form).
 - A hut placed **before** this port's attachments existed is invisible to
   `has_farmers_hut` until re-placed (no migration from 0.1.1 worlds; the formats differ anyway).
 - The villager-fallback citizen does not farm (above).
-- `python3 ports/tools/upstream_ready.py minecolonies --copyleft` now reports the pin blocker
-  (`pinned to 0b14f8ac, not 1d63e0a5`): the tool hardcodes the campaign pin, and the SDK nightly is
-  a campaign-level ruling, not a port defect.
+- `python3 ports/tools/upstream_ready.py minecolonies --copyleft` reports the pin blocker when the
+  tool's hardcoded campaign pin differs from the port's: the SDK nightly is a campaign-level ruling,
+  not a port defect.
+
+## Review fixes (2026-11-18) — registry review #1175
+
+| Finding | Fix | Test / proof |
+|---|---|---|
+| `src/support.rs:268` — the nearest-colony fallback served the management commands, so a nearby stranger could rename, resize, hire into and reassign jobs in another player's colony | management (`rename`, `radius`, `hire`, `assign`) now resolves through `owned_colony` and `runtime::may_manage`; reading a neighbour's colony (`info`, `list`, `job info`) is unchanged | `runtime::tests::only_the_owner_may_manage_a_colony` (watched failing with the check removed) |
+| `src/support.rs:731` — hire had no roster limit, cooldown or cost and spawned a persistent citizen each time | `runtime::MAX_CITIZENS` (16) with `hire_refusal`, checked **before** a mob is spawned, so both the saved roster and the live mob count are bounded (upstream bounds them by housing, which this slice does not model) | `runtime::tests::a_hire_is_refused_once_the_roster_is_at_the_cap` (watched failing with the refusal removed) |
+| `mods/minecolonies.toml:27` — `GPL-3.0-only` vs the port's `-or-later` | the **package** now says `GPL-3.0-only` in `Cargo.toml`, `horizon-mod.toml`, `README.md` and `LICENSE-NOTICE.md`: the jar and the repository say `GPL3`, the licence file has no "or later" clause, and the registry entry's scope is the orchestrator's | the four files quoted in the verification below |
+
+**Found while proving the leg:** the citizen's own `EntityPart` never ticked — a vanilla-family
+entity type (the citizen is a villager template) hears no `general_entity_tick` at this pin — so
+the job never ran. The town hall now drives its roster: a `TownHallWorker` Part ticks the hall
+and steps each citizen on its own 40th tick (unit-tested `uuid_value` round trip). The e2e also
+gained a far-arena stand/support and a far-crop assertion that accepts the wheat's regrowth
+(age < 7) plus a second harvest count, and the `CONTROL_GAME` control is the Nightly without the
+package. **Ladder:** 39 tests, clippy `-D warnings` 0, `fmt --check` clean, two builds
+byte-identical, `check` and `fits` exit 0; `launcher-game.sh run minecolonies` → `PASS` +
+`EXIT:0`, `GAME=$CONTROL_GAME` → `EXIT:1` (`../_shared/evidence/minecolonies-e2e/`).
+
+Package 0.2.1: **54,038 B**, SHA-256 `5c46f90c4e84c347eae117136235f97bb8c16febe1afd4d7d5a7a898f0d66186`;
+a second build is byte-identical (`cmp`), `check` and `fits` exit 0.
 
 ## Verification
 
-Skills: superpowers/using-superpowers,writing-plans,test-driven-development,verification-before-completion; BeautifulRust/rust-best-practices,rust-port
+Skills: superpowers/using-superpowers,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port
 
-At **0.2.0 / `0b14f8a`** (2026-11-18), every log under
-`ports/_shared/evidence/minecolonies/`:
+At **0.2.4 / `0a875da`** (2026-11-21), the logs under `ports/_shared/evidence/minecolonies/` and
+`ports/_shared/evidence/minecolonies-e2e/`. Every ladder log prints the sha256 of the delivered
+package it was run against.
 
 | step | command | result | log |
 |---|---|---|---|
-| runtime tests | `cargo test --offline --locked` | **36 passed**, 0 failed | `sdk-test.log` |
-| lints | `cargo clippy --offline --locked --all-targets -- -D warnings` | exit 0, **0 warnings** | `sdk-lint.log` |
-| format | `cargo fmt --check` | `fmt_exit=0` | `sdk-fmt.log` |
-| compile | `cargo build --offline --locked` | exit 0 | `sdk-build.log` |
-| package + check + fits | `cargo horizon-mod build` → `check` → `check --uses` → `fits` | `minecolonies 0.2.0 (native-mod, format native-1/0b14f8a…/e59da90…)`, **53,767 B**, sha256 **`0d014f3f5973b23c6544e4d860e10b59fd02deb3e3d72c63de377102272bbda5`**, `fits`: `0b14f8a made for` | `sdk-check.log` |
-| content | `python3 tools/assemble_content.py --check`, `python3 tools/gen_assets.py --check` | `assets/minecolonies/: 15 files, byte-identical to the palette's output`, exit 0 | — |
-| package contents | unzip listing | 38 entries; `LICENSE` (GPL-3.0 text) and `LICENSE-NOTICE.md` inside | — |
-| reproducibility | `cargo horizon-mod build` twice | same 53,767 B and same sha256 | — |
-| runtime byte-identity | `cmp src/runtime.rs <(unzip -p legacy/minecolonies-0.1.1.hnmod mixins/minecolonies/runtime.rs)` | identical, sha256 `cca59b398d2ed9c870e5820fa1ca764f0adb5d5ddf3a3783cf369dc30351299e` | — |
+| repin | `cargo horizon-mod update --horizon 0a875da…` | *"MineColonies, from 0b14f8a to 0a875da: none of the 287 items it uses changed."* then *"Pinned to Horizon 0a875da…"*; `.horizon/sdk` refetched (`SDK 0a875da (build 0a875da…)`) | — |
+| runtime tests (red) | `cargo test --offline` with the new rules as `unimplemented!()` | **41 passed, 14 failed**, `not implemented: the tree's connected cluster` / `the miner's shaft` / `the lumberjack's step` | `sdk-test-slice2-red.log` |
+| runtime tests | `cargo test --offline --locked` | **55 passed**, 0 failed | `sdk-test.log` |
+| lints | `cargo clippy --offline --locked --all-targets -- -D warnings` | exit 0, **0 warnings**, `CLIPPY_EXIT:0` | `sdk-clippy.log` |
+| format | `cargo fmt --check` | `FMT_EXIT:0` | `sdk-fmt.log` |
+| package, twice | `rm -f Cargo.lock && cargo horizon-mod build` ×2 | **`CMP:identical`**, 63,940 B, sha256 **`d81dcd77b30d37f2c0291ee2b4ee736e03848754d04661f31dc7493960dac0aa`** | `sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.log` |
+| registry check | `cargo horizon-mod check <delivered file>` | `minecolonies 0.2.4 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 63,940 B, SHA-256 `d81dcd77…ac0aa` | `sdk-check.log` |
+| compile the package's source | `cargo horizon-mod check --uses <delivered file>` | exit 0 (the wasm pass; its unused-item notes are the native-only Parts) | `sdk-check-uses.log` |
+| fits the pin | `cargo horizon-mod fits <delivered file> --build 0a875da` | `0a875da  made for` | `sdk-fits.log` |
+| fits another build | `cargo horizon-mod fits <delivered file> --build 0b14f8a` | `0b14f8a  fits` | `sdk-fits-other.log` |
+| content | `python3 tools/gen_assets.py --check`, `python3 tools/assemble_content.py --check` | `assets/minecolonies/: 15 files, byte-identical to the palette's output`; `data/` matches the assembler | `sdk-assets.log` |
+| package contents | `unzip -l` | **37 entries**; `LICENSE` (GPL-3.0 text) and `LICENSE-NOTICE.md` inside; **no `Cargo.lock`** | `sdk-entries.txt` |
+| gate | `python3 ports/tools/verify-sdk-package.py minecolonies` | **1/1 package(s) verified** | — |
+| game build | `ports/tools/launcher-game.sh build minecolonies` | `Compiling minecolonies (1 of 1)` (the manifest's version moved, so the launcher could not reuse a build) | — |
+| in game | `build-slot.sh run … --step e2e -- tools/e2e.sh` | **PASS** + `EXIT:0`, phases A–N | `minecolonies-e2e/e2e-launcher.log` |
+| control (the unmodded Nightly) | `GAME=$CONTROL_GAME tools/e2e.sh` | **FAIL** at `Unknown item 'minecolonies:blockhuttownhall'`, `EXIT:1` | `minecolonies-e2e/e2e-launcher-control.log` |
+| control inside the same run | `CONTROL=1 tools/e2e.sh` | the control leg says *"without the package: no town hall item"*, then the modded leg is **PASS** + `EXIT:0` | `minecolonies-e2e/e2e-launcher-control-inside.log` |
+| fail-capability (depth) | `SELFTEST=1 tools/e2e.sh` | **FAIL** `the miner did not dig 9 blocks above the bedrock`, `EXIT:1` | `minecolonies-e2e/e2e-selftest.log` |
+| fail-capability (founding) | `FOUNDING_SELFTEST=1 tools/e2e.sh` | **FAIL** `selftest: the second town hall was refused, as it should be`, `EXIT:1` | `minecolonies-e2e/e2e-founding-selftest.log` |
+| log gate | `python3 ports/tools/check-e2e-logs.py minecolonies-e2e --strict` | `logs=5 ok=5 missing-exit=0 bad-exit=0`, exit 0 | — |
+| coverage | `python3 ports/tools/check-coverage.py minecolonies` | every carried family `tested` or declared `not ported`/`blocked(...)` | — |
 
-**Not run: `tools/e2e.sh`.** It needs a game binary built at `0b14f8a`, which does not exist on
-this machine; the script was migrated to the flat layout (`--dev-mod "$PORT"`, `CONTROL=1` = the
-same game without it) and refuses to start without `GAME`. The in-game claims above are therefore
-the 0.1.1 behaviour that the same `runtime.rs` and the same scenario asserted — not a 0.2.0
-transcript. `python3 ports/tools/check-e2e-logs.py minecolonies --strict` will not find a 0.2.0
-log; the 0.1.1 logs (`e2e-dev.log`, `e2e-embedded.log`, `e2e-nightly.log`, `e2e-selftest.log`) are
-kept unchanged beside them.
+**The in-game run at this pin, 2026-11-21** (`minecolonies-e2e/e2e-launcher.log`, the phases in
+order): A–E founding and both refusals (including 120 across × 200 up, the fixed defect), F/ G/ H
+the hut, the hire and the building rule, I the farmer harvests and walks, J a citizen with no
+colony is inert, K the colony survives quit + relaunch, L the two trees (a sapling replanted only
+when the chest held one, the leaves untouched, 4 then 8 logs in the chest, `0 → 4 → 8` logs
+felled), M the miner's 1×1 eight-block shaft to the bedrock (bedrock and the four neighbouring
+floor blocks untouched, 8 cobblestone in the chest, the dug counter 8), N the three recipes crafted
+in a real table with their controls, the scythe read back and an unknown id refused. Every
+assertion of L and M has its counterfactual in the same run (the citizen unemployed beside the same
+tree/column stays whole) and the depth inversion is the `SELFTEST=1` leg.
 
-History — the 0.1.1 evidence, still valid for the behaviour the logic encodes:
+`tools/e2e.sh` launches with **`--offscreen`** rather than `--headless`: phase N opens a crafting
+table's menu and clicks its slots, and a menu needs a screen.
 
-- **Runtime tests** 36/36, written first (the red run was 0 passed / 36 failed against
-  `unimplemented!()` bodies).
-- **Ladder at `9f42064`**: fmt, clippy (0 warnings), `stage|check|test|build` green, embedded tests
-  `game::minecolonies::tests` 36 passed (`nightly-*.log`).
-- **e2e at `9f42064`** (`EMBEDDED=1`, `e2e-nightly.log`): `PASS` + `EXIT:0` — the colony founds at
-  64 blocks, both refusals hold (including 120 across / 120 up), the citizen joins, takes the
-  farmer's job, harvests and walks, a citizen with no colony does nothing, and the colony survives
-  quit + relaunch (harvests 2 → 3); `EMBEDDED=1` control knows no mod id; `SELFTEST=1` exits 1.
-- **Package 0.1.1**: `.hnmod` 38,828 B sha256 `c7bfea6a…` (archived; the older `dc665016…` in the
-  previous revision of this file was a 38,827 B build superseded by the bytes on disk).
+**Not carried, not claimed:** the two jobs' buildings (the deviations section), the builder's
+schematics, and everything in the gap list above. The e2e's citizen inventory is the colony's chest,
+stated as a deviation, not as upstream's own building rack.
 
-## Changelog for the resubmission (verbatim)
+History — the 0.2.1/0.2.0 evidence (`retired-0.2.1/`, moved when 0.2.4 superseded it):
 
-Supersedes #951, closed because Horizon retired `.hnmod` (#17992). Changes: flat SDK package with
-`api = "0.2"` and `[native]` pinned to `0b14f8a`; hooks rewritten as `impl mod_api::Hooks` methods
-against typed hosts/events (6 methods mapped — `register`, `entity_place`, `level_tick_post`,
-`register_commands`, `run_mod_command` and the citizen's `EntityPart::general_entity_tick` — with
-2 helpers retired without a gap and 4 gaps recorded, the unverified-in-game persistence among
-them); `runtime.rs` and its tests unchanged.
+- **0.2.0 / `0b14f8a`** (2026-11-18): 36 tests, clippy 0, `53,767 B` sha256 `0d014f3f…`, `fits`
+  `0b14f8a made for`; **no in-game run at that pin** (no game binary existed), recorded as a gap.
+- **0.2.1 / `0b14f8a`** (2026-11-19): 39 tests after the registry review's three fixes, `54,038 B`
+  sha256 `5c46f90c…`, in-game `PASS` + `EXIT:0` with the control at `EXIT:1`
+  (`minecolonies-e2e/e2e-launcher.log`, recorded then; superseded by this run).
+- **0.1.1 / `9f42064`**: the retired `.hnmod`; 36 runtime tests first (0 passed / 36 failed against
+  `unimplemented!()`), the embedded-content leg with its control, and the 38,828 B bundle
+  (`e2e-dev.log`, `e2e-embedded.log`, `e2e-nightly.log`, `e2e-selftest.log`).
+
+## Changelog for the next version (verbatim)
+
+**0.2.4** — the second slice, `lumberjack` and `miner`:
+
+- **`lumberjack`**: a citizen fells a whole connected log cluster inside the colony, top-down, one
+  block per work tick, leaving the leaves; the logs go into the colony's chest and the colony counts
+  them; the last log puts one sapling of that tree back on the stump's soil **when the chest holds
+  one** (a Nether stem replants its fungus). Assigned with
+  `/minecolonies job assign <citizen> lumberjack`.
+- **`miner`**: a citizen sinks a **1×1 shaft** straight down from where it stands, one block per
+  work tick, never into bedrock, never into water or lava, never past the world floor or outside the
+  colony, and every drop goes into the colony's chest. Assigned with `… miner`.
+- The colony record gained two counters (`Felled`, `Dug`), optional on read so a 0.2.1 colony still
+  loads; `/minecolonies colony info` and `job info` print them; `job assign` refuses an unknown job
+  by name; both jobs step on the roster's own 40-tick cadence.
+- The **scythe recipe** was shadowed by vanilla's iron hoe and could not be crafted; its ingredients
+  were re-placed in a shape no vanilla recipe owns, and all three carried recipes are now crafted in
+  game (`tools/craft_check.py`).
+- Re-pinned to Horizon **`0a875da`** (Nightly 2026-11-20) + horizon-mixins `e59da90`; every in-game
+  claim is a transcript at that pin, with a control that fails without the package and two
+  fail-capable legs.
+
+Supersedes #951, closed because Horizon retired `.hnmod` (#17992). The `.hnmod` at 0.1.1 and the SDK
+package at 0.2.0/0.2.1 stay in the record; this is the 0.2.4 rebuild of the same port with two more
+jobs.

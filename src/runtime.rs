@@ -26,6 +26,28 @@ pub const FARMER_DELAY_TICKS: u64 = 40;
 pub const FARMER_REACH: f64 = 2.5;
 /// The farmer's stride per work tick, in blocks: a walk, not a teleport across the field.
 pub const FARMER_STRIDE: f64 = 0.6;
+/// Upstream's per-job delay has the farmer's shape, `max(1, 40 - skill / 2)`
+/// (`EntityAIWorkFarmer.java:85,692`); this slice runs every job at skill 0, so a lumberjack
+/// steps once per 40 ticks on its own phase, like the farmer.
+pub const LUMBERJACK_DELAY_TICKS: u64 = 40;
+/// The miner's work tick: the same 40 ticks at skill 0.
+pub const MINER_DELAY_TICKS: u64 = 40;
+/// A lumberjack acts on a log it can reach without taking another step (the farmer's shape).
+pub const LUMBERJACK_REACH: f64 = 2.5;
+/// The lumberjack's stride per work tick, in blocks.
+pub const LUMBERJACK_STRIDE: f64 = 0.6;
+/// How far around itself a lumberjack looks for a log; the colony's own radius is checked too.
+pub const LUMBERJACK_SEARCH: i32 = 16;
+/// How far above the first log a tree's cluster is followed.
+pub const TREE_REACH_UP: i32 = 32;
+/// How far below it the cluster is followed (a trunk may start in a hole).
+pub const TREE_REACH_DOWN: i32 = 8;
+/// The most logs one cluster may hold, so a wall of logs cannot make one work tick scan a forest.
+pub const MAX_TREE_LOGS: usize = 64;
+/// The empty block.
+pub const AIR: &str = "minecraft:air";
+/// The one block a miner never breaks.
+pub const BEDROCK: &str = "minecraft:bedrock";
 
 /// The town hall block (`BlockHutTownHall.getHutName`, `blockhuttownhall`).
 pub const TOWN_HALL: &str = "minecolonies:blockhuttownhall";
@@ -223,12 +245,15 @@ pub fn founding_refusal(
     })
 }
 
-/// A job a citizen can hold. Slice 1 implements the farmer; the rest are the mod's own jobs,
-/// listed as a gap in `notes.md`.
+/// A job a citizen can hold. Slice 1 implemented the farmer; slice 2 adds the two jobs the
+/// gap list named next — a lumberjack that fells whole trees and a miner that sinks a shaft.
+/// The rest are the mod's own jobs, listed as a gap in `notes.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Job {
     Unemployed,
     Farmer,
+    Lumberjack,
+    Miner,
 }
 
 impl Job {
@@ -238,6 +263,8 @@ impl Job {
         match self {
             Self::Unemployed => "unemployed",
             Self::Farmer => "farmer",
+            Self::Lumberjack => "lumberjack",
+            Self::Miner => "miner",
         }
     }
 
@@ -247,16 +274,43 @@ impl Job {
         match id {
             "unemployed" => Some(Self::Unemployed),
             "farmer" => Some(Self::Farmer),
+            "lumberjack" => Some(Self::Lumberjack),
+            "miner" => Some(Self::Miner),
             _ => None,
         }
     }
 
-    /// The name a line of feedback uses.
+    /// The name a line of feedback uses. Upstream's lang labels the lumberjack "Forester"
+    /// (`com.minecolonies.job.lumberjack`), which the port keeps for the job id, not the label.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Unemployed => "Unemployed",
             Self::Farmer => "Farmer",
+            Self::Lumberjack => "Lumberjack",
+            Self::Miner => "Miner",
+        }
+    }
+
+    /// The building the job needs, when this slice has that block. Upstream gives every job a
+    /// building; only the farmer's hut exists in this port so far (`FARMER_HUT`), so the two
+    /// new jobs are assignable without one (a gap in `notes.md`, not a rule upstream lacks).
+    #[must_use]
+    pub const fn building(self) -> Option<&'static str> {
+        match self {
+            Self::Farmer => Some(FARMER_HUT),
+            _ => None,
+        }
+    }
+
+    /// The job's work delay in ticks, or `None` for a citizen that holds no job.
+    #[must_use]
+    pub const fn delay(self) -> Option<u64> {
+        match self {
+            Self::Unemployed => None,
+            Self::Farmer => Some(FARMER_DELAY_TICKS),
+            Self::Lumberjack => Some(LUMBERJACK_DELAY_TICKS),
+            Self::Miner => Some(MINER_DELAY_TICKS),
         }
     }
 }
@@ -288,6 +342,10 @@ pub struct Colony {
     pub founded: i64,
     /// Crops the colony's workers have harvested.
     pub harvested: u64,
+    /// Logs the colony's lumberjacks have felled.
+    pub felled: u64,
+    /// Blocks the colony's miners have dug.
+    pub dug: u64,
     pub citizens: Vec<Citizen>,
 }
 
@@ -304,6 +362,8 @@ impl Colony {
             size_chunks: founding.size_chunks,
             founded: now,
             harvested: 0,
+            felled: 0,
+            dug: 0,
             citizens: Vec::new(),
         }
     }
@@ -349,12 +409,45 @@ impl Colony {
     pub fn harvest(&mut self) {
         self.harvested += 1;
     }
+
+    /// Adds `count` logs to the colony's felled total.
+    pub fn count_felled(&mut self, count: u64) {
+        self.felled += count;
+    }
+
+    /// Adds `count` blocks to the colony's dug total.
+    pub fn count_dug(&mut self, count: u64) {
+        self.dug += count;
+    }
 }
 
 /// Why a roster change was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RosterError {
     UnknownCitizen(String),
+}
+
+/// The most citizens one colony's roster may hold in this slice. Upstream bounds
+/// the population by housing (beds/huts), which this slice does not model, so the
+/// cap is the bound that keeps a repeated `/minecolonies citizen hire` from growing
+/// both the saved roster and the live mob count without limit. The server refuses a
+/// hire at the cap (`hire_refusal`).
+pub const MAX_CITIZENS: usize = 16;
+
+/// Why a hire into `colony` is refused, or `None` when the roster has room.
+#[must_use]
+pub fn hire_refusal(colony: &Colony) -> Option<&'static str> {
+    (colony.citizens.len() >= MAX_CITIZENS).then_some(
+        "the colony's roster is full (16 citizens): this slice has no housing to grow it",
+    )
+}
+
+/// Whether the player named by `actor` (a UUID as text) owns `colony`. Managing a
+/// colony — rename, radius, hire, job assignment — is the owner's alone: a nearby
+/// player without a colony is not delegated any permission by standing there.
+#[must_use]
+pub fn may_manage(colony: &Colony, actor: &str) -> bool {
+    !actor.is_empty() && colony.owner == actor
 }
 
 impl fmt::Display for RosterError {
@@ -399,10 +492,12 @@ pub fn should_work(game_time: i64, entity: u32, delay: u64) -> bool {
 /// What the farmer does on one work tick.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Step {
-    /// Walk toward the crop.
+    /// Walk toward the crop (the farmer), the log (the lumberjack).
     Walk([f64; 3]),
     /// Harvest the crop at the position.
     Harvest(Pos),
+    /// Break the log at the position: the lumberjack's action.
+    Fell(Pos),
 }
 
 /// The farmer's step: walk toward the crop while it is farther than `reach`, harvest it
@@ -435,12 +530,229 @@ pub fn step_toward(from: [f64; 3], to: Pos, stride: f64) -> [f64; 3] {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// The lumberjack: a whole tree, felled from the top, replanted on its stump's soil
+// ---------------------------------------------------------------------------
+
+/// Whether `id` is a tree's trunk block: `minecraft:logs` is `*_log`, `*_wood`, `*_stem` and
+/// `*_hyphae` at 26.3 (`block-tags.json`), and the SDK exposes no block-tag query, so the id is
+/// the rule. Leaves are not logs and are never touched by a lumberjack.
+#[must_use]
+pub fn is_log(id: &str) -> bool {
+    let path = id.split_once(':').map_or(id, |(_, path)| path);
+    ["_log", "_wood", "_stem", "_hyphae"]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+}
+
+/// The sapling that replants the tree `log` came from, or None for something that is not a trunk.
+///
+/// A stripped trunk replants its family (`stripped_oak_log` → `minecraft:oak_sapling`), and the
+/// Nether's stems grow fungi (`crimson_stem` → `minecraft:crimson_fungus`), which is what
+/// upstream's sapling map answers for them.
+#[must_use]
+pub fn sapling_for(log: &str) -> Option<String> {
+    let (namespace, path) = log.split_once(':')?;
+    let path = path.strip_prefix("stripped_").unwrap_or(path);
+    let family = ["_log", "_wood", "_stem", "_hyphae"]
+        .iter()
+        .find_map(|suffix| path.strip_suffix(suffix))?;
+    let sapling = match family {
+        "crimson" | "warped" => format!("{namespace}:{family}_fungus"),
+        _ => format!("{namespace}:{family}_sapling"),
+    };
+    Some(sapling)
+}
+
+/// Whether a sapling may be planted on `soil` (`SaplingBlock.canSurvive`'s ground, plus the
+/// farmland a colony's own farm leaves behind).
+#[must_use]
+pub fn grows_a_sapling(soil: &str) -> bool {
+    matches!(
+        soil,
+        "minecraft:dirt"
+            | "minecraft:grass_block"
+            | "minecraft:podzol"
+            | "minecraft:coarse_dirt"
+            | "minecraft:rooted_dirt"
+            | "minecraft:moss_block"
+            | "minecraft:farmland"
+            | "minecraft:mud"
+            | "minecraft:muddy_mangrove_roots"
+    )
+}
+
+/// One tree: every log of the connected cluster, and the trunk they hang on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tree {
+    /// The trunk block every log of the cluster is (`minecraft:oak_log`, …).
+    pub log: String,
+    /// The cluster, in the order a lumberjack fells it: the highest log first, so the trunk is
+    /// never left floating above the one being cut.
+    pub logs: Vec<Pos>,
+}
+
+impl Tree {
+    /// The log to cut next: the highest one left.
+    #[must_use]
+    pub fn next(&self) -> Option<Pos> {
+        self.logs.first().copied()
+    }
+
+    /// How many logs the tree still has.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.logs.len()
+    }
+
+    /// Whether the tree has been felled.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.logs.is_empty()
+    }
+
+    /// The stump's log: the lowest one, whose soil the sapling goes back onto.
+    #[must_use]
+    pub fn stump(&self) -> Option<Pos> {
+        self.logs
+            .iter()
+            .copied()
+            .min_by_key(|pos| (pos.y, pos.x, pos.z))
+    }
+}
+
+/// The tree `seed` belongs to: its connected logs of the same block, by six-neighbour steps,
+/// bounded by [`MAX_TREE_LOGS`] and the `TREE_REACH_*` window so one work tick cannot scan a
+/// forest.
+#[must_use]
+pub fn tree_at(seed: Pos, log: &str, block: impl Fn(Pos) -> Option<String>) -> Tree {
+    // Six-neighbour steps: a trunk is a column, and a branch is joined to it face to face.
+    const NEIGHBOURS: [(i32, i32, i32); 6] = [
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ];
+    let mut logs = vec![seed];
+    let mut index = 0;
+    'fill: while index < logs.len() {
+        let at = logs[index];
+        index += 1;
+        for (dx, dy, dz) in NEIGHBOURS {
+            let next = Pos::new(at.x + dx, at.y + dy, at.z + dz);
+            if next.y > seed.y + TREE_REACH_UP || next.y < seed.y - TREE_REACH_DOWN {
+                continue;
+            }
+            if logs.contains(&next) || block(next).as_deref() != Some(log) {
+                continue;
+            }
+            logs.push(next);
+            if logs.len() >= MAX_TREE_LOGS {
+                break 'fill;
+            }
+        }
+    }
+    // Felled from the top down: the trunk is never left hanging over the log being cut.
+    logs.sort_by(|a, b| b.y.cmp(&a.y).then(a.x.cmp(&b.x)).then(a.z.cmp(&b.z)));
+    Tree {
+        log: log.to_owned(),
+        logs,
+    }
+}
+
+/// The lumberjack's step: walk toward the next log while it is farther than `reach`, fell it
+/// otherwise. None when there is no tree.
+#[must_use]
+pub fn lumberjack_step(citizen: [f64; 3], tree: Option<&Tree>, reach: f64) -> Option<Step> {
+    let next = tree?.next()?;
+    let dx = f64::from(next.x) + 0.5 - citizen[0];
+    let dz = f64::from(next.z) + 0.5 - citizen[2];
+    if dx.hypot(dz) <= reach {
+        return Some(Step::Fell(next));
+    }
+    Some(Step::Walk(step_toward(citizen, next, LUMBERJACK_STRIDE)))
+}
+
+// ---------------------------------------------------------------------------
+// The miner: a 1×1 shaft straight down, stopping at bedrock, liquid and the colony's edge
+// ---------------------------------------------------------------------------
+
+/// Whether a block is a fluid a miner must not open into.
+#[must_use]
+pub fn is_liquid(id: &str) -> bool {
+    matches!(
+        id,
+        "minecraft:water" | "minecraft:lava" | "minecraft:bubble_column"
+    ) || id.ends_with("_water")
+        || id.ends_with("_lava")
+        || id.ends_with(":water")
+        || id.ends_with(":lava")
+}
+
+/// Why a shaft stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MineStop {
+    /// `minecraft:bedrock` is in the way: upstream never mines it.
+    Bedrock,
+    /// Water or lava is in the way: upstream will not open a shaft into it.
+    Liquid,
+    /// The miner stands outside the colony it works for.
+    OutsideColony,
+    /// Nothing is left to dig (the scan reached the floor).
+    Nothing,
+}
+
+/// What a miner's work tick does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mining {
+    /// The block to break: the first one under the shaft.
+    Next(Pos),
+    /// The shaft stops, with the reason.
+    Stop(MineStop),
+}
+
+/// The miner's next block: the first block under `stand` that is not air, down to `floor`.
+/// `block` answers what stands at a position (None for an unloaded one). The shaft is the one
+/// column `stand` occupies, so it never leaves the colony's claim while `stand` is inside it.
+#[must_use]
+pub fn miner_next(
+    stand: Pos,
+    colony: &Colony,
+    floor: i32,
+    block: impl Fn(Pos) -> Option<String>,
+) -> Mining {
+    if !colony.contains(stand) {
+        return Mining::Stop(MineStop::OutsideColony);
+    }
+    // One column, from the block under the miner down: the first block that is not air is the
+    // shaft's next block, so a shaft that already has a hole in it is not dug twice.
+    for y in (floor..stand.y).rev() {
+        let pos = Pos::new(stand.x, y, stand.z);
+        let Some(id) = block(pos) else {
+            continue;
+        };
+        if id == AIR {
+            continue;
+        }
+        if id == BEDROCK {
+            return Mining::Stop(MineStop::Bedrock);
+        }
+        if is_liquid(&id) {
+            return Mining::Stop(MineStop::Liquid);
+        }
+        return Mining::Next(pos);
+    }
+    Mining::Stop(MineStop::Nothing)
+}
+
 /// A saved value of the colony record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Int(i32),
     Long(i64),
-    Text(String),
+    Str(String),
     /// `(id, name, job id)`, as the roster is written out.
     Citizens(Vec<(String, String, String)>),
 }
@@ -473,15 +785,23 @@ pub fn colony_fields(colony: &Colony) -> Vec<(&'static str, Value)> {
             "Id",
             Value::Int(i32::try_from(colony.id).unwrap_or(i32::MAX)),
         ),
-        ("Name", Value::Text(colony.name.clone())),
-        ("Owner", Value::Text(colony.owner.clone())),
-        ("OwnerName", Value::Text(colony.owner_name.clone())),
+        ("Name", Value::Str(colony.name.clone())),
+        ("Owner", Value::Str(colony.owner.clone())),
+        ("OwnerName", Value::Str(colony.owner_name.clone())),
         ("Center", Value::Long(pack_pos(colony.center))),
         ("Size", Value::Int(colony.size_chunks)),
         ("Founded", Value::Long(colony.founded)),
         (
             "Harvested",
             Value::Long(i64::try_from(colony.harvested).unwrap_or(i64::MAX)),
+        ),
+        (
+            "Felled",
+            Value::Long(i64::try_from(colony.felled).unwrap_or(i64::MAX)),
+        ),
+        (
+            "Dug",
+            Value::Long(i64::try_from(colony.dug).unwrap_or(i64::MAX)),
         ),
         (
             "Citizens",
@@ -501,15 +821,18 @@ pub fn colony_fields(colony: &Colony) -> Vec<(&'static str, Value)> {
         ),
     ]
 }
-
 /// The record back from its saved fields (the inverse of [`colony_fields`]).
 ///
+/// `Felled` and `Dug` are optional: a record a 0.2.1 colony saved has neither, and reading it
+/// must not fail (the two counters then start at zero).
+///
 /// # Errors
-/// `Missing` for a required key, `Job` for a job id this slice does not know.
+/// `Missing` for a required key, `Kind` for a value of the wrong type, `Job` for a job id this
+/// slice does not know.
 pub fn colony_from_fields(fields: &[(&str, Value)]) -> Result<Colony, RecordError> {
     let map: BTreeMap<&str, &Value> = fields.iter().map(|(key, value)| (*key, value)).collect();
     let text = |key: &'static str| match map.get(key) {
-        Some(Value::Text(text)) => Ok(text.clone()),
+        Some(Value::Str(text)) => Ok(text.clone()),
         Some(_) => Err(RecordError::Kind(key)),
         None => Err(RecordError::Missing(key)),
     };
@@ -522,6 +845,12 @@ pub fn colony_from_fields(fields: &[(&str, Value)]) -> Result<Colony, RecordErro
         Some(Value::Long(value)) => Ok(*value),
         Some(_) => Err(RecordError::Kind(key)),
         None => Err(RecordError::Missing(key)),
+    };
+    // A counter that a record saved before it existed does not carry: zero, not an error.
+    let counter = |key: &'static str| match map.get(key) {
+        Some(Value::Long(value)) => u64::try_from(*value).map_err(|_| RecordError::Kind(key)),
+        Some(_) => Err(RecordError::Kind(key)),
+        None => Ok(0),
     };
     let mut citizens = Vec::new();
     match map.get("Citizens") {
@@ -547,6 +876,8 @@ pub fn colony_from_fields(fields: &[(&str, Value)]) -> Result<Colony, RecordErro
         size_chunks: int("Size")?,
         founded: long("Founded")?,
         harvested: u64::try_from(long("Harvested")?).map_err(|_| RecordError::Kind("Harvested"))?,
+        felled: counter("Felled")?,
+        dug: counter("Dug")?,
         citizens,
     })
 }
@@ -776,6 +1107,8 @@ mod tests {
             size_chunks: 6,
             founded: 1234,
             harvested: 9,
+            felled: 3,
+            dug: 5,
             citizens: vec![
                 Citizen {
                     id: "c-1".to_owned(),
@@ -815,6 +1148,8 @@ mod tests {
                 "Size",
                 "Founded",
                 "Harvested",
+                "Felled",
+                "Dug",
                 "Citizens"
             ]
         );
@@ -835,7 +1170,7 @@ mod tests {
         let mut fields = colony_fields(&colony());
         for (key, value) in &mut fields {
             if *key == "Id" {
-                *value = Value::Text("four".to_owned());
+                *value = Value::Str("four".to_owned());
             }
         }
         assert_eq!(colony_from_fields(&fields), Err(RecordError::Kind("Id")));
@@ -849,13 +1184,13 @@ mod tests {
                 *value = Value::Citizens(vec![(
                     "c-1".to_owned(),
                     "Ada".to_owned(),
-                    "miner".to_owned(),
+                    "guard".to_owned(),
                 )]);
             }
         }
         assert_eq!(
             colony_from_fields(&fields),
-            Err(RecordError::Job("miner".to_owned()))
+            Err(RecordError::Job("guard".to_owned()))
         );
     }
 
@@ -907,6 +1242,45 @@ mod tests {
             colony.assign("c-9", Job::Farmer),
             Err(RosterError::UnknownCitizen("c-9".to_owned()))
         );
+    }
+
+    #[test]
+    fn a_hire_is_refused_once_the_roster_is_at_the_cap() {
+        let mut colony = Colony::founded(
+            founding_refusal("Riverside", Some(&owner()), centre(), &[]).expect("a free site"),
+            7,
+        );
+        for index in 0..MAX_CITIZENS - 1 {
+            colony.hire(Citizen {
+                id: format!("c-{index}"),
+                name: format!("Citizen {index}"),
+                job: Job::Unemployed,
+            });
+        }
+        assert_eq!(hire_refusal(&colony), None, "one slot short of the cap");
+        colony.hire(Citizen {
+            id: "c-last".to_owned(),
+            name: "Last".to_owned(),
+            job: Job::Unemployed,
+        });
+        assert!(
+            hire_refusal(&colony).is_some(),
+            "a full roster must refuse the next hire, not grow the mob count"
+        );
+    }
+
+    #[test]
+    fn only_the_owner_may_manage_a_colony() {
+        let colony = Colony::founded(
+            founding_refusal("Riverside", Some(&owner()), centre(), &[]).expect("a free site"),
+            7,
+        );
+        assert!(may_manage(&colony, &owner().id));
+        assert!(
+            !may_manage(&colony, "00000000-0000-0000-0000-000000000002"),
+            "a nearby stranger is not the owner"
+        );
+        assert!(!may_manage(&colony, ""), "an absent actor manages nothing");
     }
 
     #[test]
@@ -994,5 +1368,307 @@ mod tests {
             (to[0] - 0.5).abs() < 1e-9 && (to[2] - 0.5).abs() < 1e-9,
             "{to:?}"
         );
+    }
+
+    // --- the lumberjack ---------------------------------------------------------------------
+
+    /// A world from a list of `(x, y, z, block id)`; an absent position reads as air.
+    fn world(blocks: &[(i32, i32, i32, &'static str)]) -> impl Fn(Pos) -> Option<String> {
+        let blocks: Vec<(Pos, &'static str)> = blocks
+            .iter()
+            .map(|(x, y, z, id)| (Pos::new(*x, *y, *z), *id))
+            .collect();
+        move |pos| {
+            Some(
+                blocks
+                    .iter()
+                    .find(|(at, _)| *at == pos)
+                    .map_or(AIR, |(_, id)| *id)
+                    .to_owned(),
+            )
+        }
+    }
+
+    #[test]
+    fn a_log_is_recognised_by_its_id() {
+        for id in [
+            "minecraft:oak_log",
+            "minecraft:birch_wood",
+            "minecraft:warped_stem",
+            "minecraft:crimson_hyphae",
+            "minecraft:stripped_oak_log",
+            "somemod:rubber_log",
+        ] {
+            assert!(is_log(id), "{id} is a trunk");
+        }
+        for id in [
+            "minecraft:oak_leaves",
+            "minecraft:dirt",
+            "minecraft:oak_sapling",
+            "minecraft:oak_planks",
+            "minecraft:logical_crafting_table",
+        ] {
+            assert!(!is_log(id), "{id} is not a trunk");
+        }
+    }
+
+    #[test]
+    fn a_trunk_names_the_sapling_that_replants_it() {
+        assert_eq!(
+            sapling_for("minecraft:oak_log").as_deref(),
+            Some("minecraft:oak_sapling")
+        );
+        assert_eq!(
+            sapling_for("minecraft:stripped_birch_log").as_deref(),
+            Some("minecraft:birch_sapling")
+        );
+        assert_eq!(
+            sapling_for("minecraft:spruce_wood").as_deref(),
+            Some("minecraft:spruce_sapling")
+        );
+        // The Nether's stems grow fungi, not saplings.
+        assert_eq!(
+            sapling_for("minecraft:crimson_stem").as_deref(),
+            Some("minecraft:crimson_fungus")
+        );
+        assert_eq!(sapling_for("minecraft:oak_leaves"), None);
+        assert_eq!(
+            sapling_for("oak_log"),
+            None,
+            "an id without a namespace has no family"
+        );
+    }
+
+    #[test]
+    fn a_tree_is_its_connected_logs_and_nothing_else() {
+        let tree = tree_at(
+            Pos::new(0, 3, 0),
+            "minecraft:oak_log",
+            world(&[
+                (0, 1, 0, "minecraft:dirt"),
+                (0, 2, 0, "minecraft:oak_log"),
+                (0, 3, 0, "minecraft:oak_log"),
+                (0, 4, 0, "minecraft:oak_log"),
+                (1, 4, 0, "minecraft:oak_log"),
+                (0, 5, 0, "minecraft:oak_leaves"),
+                (1, 4, 1, "minecraft:oak_leaves"),
+                (2, 4, 0, "minecraft:birch_log"),
+            ]),
+        );
+        assert_eq!(tree.len(), 4, "{:?}", tree.logs);
+        assert!(
+            tree.logs.contains(&Pos::new(1, 4, 0)),
+            "the branch is part of the tree"
+        );
+        assert!(
+            !tree.logs.contains(&Pos::new(2, 4, 0)),
+            "another species is another tree"
+        );
+        assert!(
+            !tree.logs.contains(&Pos::new(0, 5, 0)),
+            "a leaf is not a log"
+        );
+        assert_eq!(tree.stump(), Some(Pos::new(0, 2, 0)));
+    }
+
+    #[test]
+    fn a_tree_is_felled_from_the_top() {
+        let tree = tree_at(
+            Pos::new(0, 2, 0),
+            "minecraft:oak_log",
+            world(&[
+                (0, 2, 0, "minecraft:oak_log"),
+                (0, 3, 0, "minecraft:oak_log"),
+                (0, 4, 0, "minecraft:oak_log"),
+            ]),
+        );
+        assert_eq!(
+            tree.next(),
+            Some(Pos::new(0, 4, 0)),
+            "the highest log goes first"
+        );
+    }
+
+    #[test]
+    fn a_huge_cluster_is_capped_so_one_step_terminates() {
+        // A 10x10 plate of logs is 100 logs: one work tick must stop at the cap.
+        let plate: Vec<(i32, i32, i32, &'static str)> = (0..10)
+            .flat_map(|x| (0..10).map(move |z| (x, 0, z, "minecraft:oak_log")))
+            .collect();
+        let tree = tree_at(Pos::new(0, 0, 0), "minecraft:oak_log", world(&plate));
+        assert_eq!(tree.len(), MAX_TREE_LOGS);
+    }
+
+    #[test]
+    fn a_lumberjack_walks_to_a_far_tree_and_fells_a_near_one() {
+        let tree = tree_at(
+            Pos::new(200, 101, 0),
+            "minecraft:oak_log",
+            world(&[(200, 101, 0, "minecraft:oak_log")]),
+        );
+        match lumberjack_step([210.0, 101.0, 0.0], Some(&tree), LUMBERJACK_REACH) {
+            Some(Step::Walk(to)) => {
+                assert!(
+                    to[0] < 210.0 && to[0] >= 210.0 - LUMBERJACK_STRIDE,
+                    "{to:?}"
+                );
+            }
+            other => panic!("expected a walk, got {other:?}"),
+        }
+        assert_eq!(
+            lumberjack_step([201.5, 101.0, 0.5], Some(&tree), LUMBERJACK_REACH),
+            Some(Step::Fell(Pos::new(200, 101, 0)))
+        );
+        assert_eq!(
+            lumberjack_step([201.5, 101.0, 0.5], None, LUMBERJACK_REACH),
+            None
+        );
+    }
+
+    #[test]
+    fn a_sapling_grows_on_soil_and_not_on_stone() {
+        for soil in [
+            "minecraft:dirt",
+            "minecraft:grass_block",
+            "minecraft:podzol",
+            "minecraft:coarse_dirt",
+            "minecraft:rooted_dirt",
+            "minecraft:farmland",
+            "minecraft:moss_block",
+        ] {
+            assert!(grows_a_sapling(soil), "{soil} grows a sapling");
+        }
+        for soil in ["minecraft:stone", "minecraft:sand", "minecraft:air"] {
+            assert!(!grows_a_sapling(soil), "{soil} does not");
+        }
+    }
+
+    // --- the miner ---------------------------------------------------------------------------
+
+    fn mining_colony() -> Colony {
+        Colony::founded(
+            founding_refusal("Riverside", Some(&owner()), centre(), &[]).expect("a free site"),
+            7,
+        )
+    }
+
+    #[test]
+    fn a_miner_digs_the_first_block_under_it() {
+        let stand = Pos::new(200, 109, 0);
+        let column = world(&[
+            (200, 108, 0, "minecraft:stone"),
+            (200, 102, 0, "minecraft:stone"),
+        ]);
+        assert_eq!(
+            miner_next(stand, &mining_colony(), 100, column),
+            Mining::Next(Pos::new(200, 108, 0)),
+            "the shaft starts at the block under the miner"
+        );
+    }
+
+    #[test]
+    fn a_miner_skips_the_air_the_shaft_already_has() {
+        let stand = Pos::new(200, 109, 0);
+        // The top two blocks are already gone; the next stone is at 106.
+        let column = world(&[
+            (200, 107, 0, "minecraft:air"),
+            (200, 106, 0, "minecraft:stone"),
+            (200, 100, 0, "minecraft:bedrock"),
+        ]);
+        assert_eq!(
+            miner_next(stand, &mining_colony(), 100, column),
+            Mining::Next(Pos::new(200, 106, 0))
+        );
+    }
+
+    #[test]
+    fn a_miner_stops_at_bedrock() {
+        let stand = Pos::new(200, 109, 0);
+        let column = world(&[(200, 100, 0, "minecraft:bedrock")]);
+        assert_eq!(
+            miner_next(stand, &mining_colony(), 100, column),
+            Mining::Stop(MineStop::Bedrock),
+            "bedrock is never broken"
+        );
+    }
+
+    #[test]
+    fn a_miner_stops_at_water_and_at_lava() {
+        let stand = Pos::new(200, 109, 0);
+        for fluid in [
+            "minecraft:water",
+            "minecraft:lava",
+            "minecraft:flowing_water",
+        ] {
+            let blocks = [(200, 105, 0, fluid)];
+            let column = world(&blocks);
+            assert_eq!(
+                miner_next(stand, &mining_colony(), 100, column),
+                Mining::Stop(MineStop::Liquid),
+                "a shaft is not opened into {fluid}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_miner_outside_the_colony_does_not_dig() {
+        let stand = Pos::new(300, 109, 300);
+        let column = world(&[(300, 108, 300, "minecraft:stone")]);
+        assert_eq!(
+            miner_next(stand, &mining_colony(), 100, column),
+            Mining::Stop(MineStop::OutsideColony)
+        );
+    }
+
+    #[test]
+    fn a_miner_stops_when_the_scan_reaches_the_floor() {
+        let stand = Pos::new(200, 101, 0);
+        assert_eq!(
+            miner_next(stand, &mining_colony(), 100, world(&[])),
+            Mining::Stop(MineStop::Nothing)
+        );
+    }
+
+    // --- the two new jobs, and the colony's counters ------------------------------------------
+
+    #[test]
+    fn the_new_jobs_round_trip_through_their_ids() {
+        for job in [Job::Lumberjack, Job::Miner] {
+            assert_eq!(Job::from_id(job.id()), Some(job));
+        }
+        assert_eq!(Job::Unemployed.building(), None);
+        assert_eq!(Job::Lumberjack.building(), None);
+        assert_eq!(Job::Farmer.building(), Some(FARMER_HUT));
+        assert_eq!(Job::Unemployed.delay(), None);
+        assert_eq!(Job::Farmer.delay(), Some(FARMER_DELAY_TICKS));
+        assert_eq!(Job::Lumberjack.delay(), Some(LUMBERJACK_DELAY_TICKS));
+        assert_eq!(Job::Miner.delay(), Some(MINER_DELAY_TICKS));
+        assert_eq!(
+            Job::from_id("guard"),
+            None,
+            "a job this slice does not implement"
+        );
+    }
+
+    #[test]
+    fn the_record_carries_the_two_job_counters() {
+        let mut colony = Colony::founded(
+            founding_refusal("Riverside", Some(&owner()), centre(), &[]).expect("a free site"),
+            7,
+        );
+        colony.count_felled(4);
+        colony.count_dug(8);
+        assert_eq!(colony.felled, 4);
+        assert_eq!(colony.dug, 8);
+        let fields = colony_fields(&colony);
+        assert_eq!(colony_from_fields(&fields), Ok(colony));
+    }
+
+    #[test]
+    fn a_record_saved_before_the_counters_existed_reads_zero() {
+        let mut fields = colony_fields(&colony());
+        fields.retain(|(key, _)| *key != "Felled" && *key != "Dug");
+        let read = colony_from_fields(&fields).expect("an older record still reads");
+        assert_eq!((read.felled, read.dug), (0, 0));
     }
 }

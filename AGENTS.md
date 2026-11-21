@@ -22,7 +22,9 @@ Validate with `cargo fmt --check`, `cargo clippy --offline --locked
 --all-targets -- -D warnings`, `cargo test --offline --locked`, then
 `cargo horizon-mod build` + `check` + `check --uses` + `fits` on the package,
 and `tools/e2e.sh` when a game binary for `horizon-mod.toml`'s `[native]` pin
-exists. Keep validation claims and supported revisions honest: `check` does not
+exists. **The package build is `rm -f Cargo.lock && cargo horizon-mod build`**:
+the packer would otherwise include the tree's `Cargo.lock`, and the delivered
+package carries none (37 entries, checked by `verify-sdk-package.py`). Keep validation claims and supported revisions honest: `check` does not
 compile the Rust, so a green `check` is not a green build. The `.hnmod` layout
 (`mixins/`, `horizon-mixin.toml`, `tools/horizon.py`, `tools/package.py`) is
 retired and archived under `../_shared/evidence/minecolonies/legacy/`.

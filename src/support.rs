@@ -19,17 +19,18 @@ use std::sync::Mutex;
 
 use mod_api::{
     AttachmentCodec, AttachmentError, AttachmentHolder, AttachmentQueries, AttachmentType,
-    BlockKey, Command, CommandArgumentValue, CommandSource, Compound, EntityRef, Flow, Holder,
-    Host, LevelRef, MobRef, PlayerRef, RegisterCommandsEvent, RunModCommandEvent, ServerHost,
-    SpawnReason, Tag, Text,
+    BlockKey, BlockUpdateFlags, Command, CommandArgumentValue, CommandSource, Compound, EntityRef,
+    Flow, Holder, Host, HostTransaction, Identifier, ItemResource, ItemStack, LevelRef, MobRef,
+    PlayerRef, RegisterCommandsEvent, RunModCommandEvent, ServerHost, SpawnReason, Tag, Text,
 };
 
 use crate::runtime::{
-    CITIZEN, Citizen, Colony, FARMER_DELAY_TICKS, FARMER_HUT, FARMER_REACH, Job,
-    MAX_COLONY_SIZE_CHUNKS, Owner, Pos, Step, TOWN_HALL, TownHall, Value, WHEAT, WHEAT_MAX_AGE,
-    WHEAT_REPLANT_AGE, clamp_size, colony_fields, colony_from_fields, colony_tag, default_name,
-    farmer_step, founding_refusal, horizontal_distance, radius_blocks, read_colony_tag,
-    should_work,
+    AIR, CITIZEN, Citizen, Colony, FARMER_HUT, FARMER_REACH, Job, LUMBERJACK_REACH,
+    LUMBERJACK_SEARCH, MAX_COLONY_SIZE_CHUNKS, Owner, Pos, Step, TOWN_HALL, TownHall, Value, WHEAT,
+    WHEAT_MAX_AGE, WHEAT_REPLANT_AGE, clamp_size, colony_fields, colony_from_fields, colony_tag,
+    default_name, farmer_step, founding_refusal, grows_a_sapling, hire_refusal,
+    horizontal_distance, is_log, lumberjack_step, may_manage, miner_next, radius_blocks,
+    read_colony_tag, sapling_for, should_work, tree_at,
 };
 
 /// The vanilla mob a citizen falls back to when the content type is not loaded.
@@ -40,6 +41,13 @@ const NAMES: [&str; 8] = ["Ada", "Bo", "Cass", "Dee", "Eli", "Fay", "Gus", "Hana
 const CROP_RANGE: i32 = 6;
 /// Vertically.
 const CROP_HEIGHT: i32 = 2;
+/// How far around a worker its colony's chest is looked for, horizontally and vertically.
+const STORAGE_SEARCH: i32 = 16;
+const STORAGE_HEIGHT: i32 = 8;
+/// The colony's store: a chest standing inside the colony keeps what its workers collect.
+const CHEST: &str = "minecraft:chest";
+/// How far above and below a worker its tree's logs are looked for.
+const LOG_SCAN_HEIGHT: i32 = 16;
 /// Why a hired citizen appears: a command summons it, as `/summon` does (not natural spawning).
 const SUMMONED: SpawnReason = SpawnReason::Command;
 
@@ -89,6 +97,8 @@ fn placeholder_colony() -> Colony {
         size_chunks: 0,
         founded: 0,
         harvested: 0,
+        felled: 0,
+        dug: 0,
         citizens: Vec::new(),
     }
 }
@@ -101,7 +111,7 @@ fn encode_colony(colony: &Colony) -> Result<Compound, AttachmentError> {
         let tag = match value {
             Value::Int(value) => Tag::Int(value),
             Value::Long(value) => Tag::Long(value),
-            Value::Text(value) => Tag::String(value.as_str().into()),
+            Value::Str(value) => Tag::String(value.as_str().into()),
             Value::Citizens(rows) => Tag::List(
                 rows.into_iter()
                     .map(|(id, name, job)| {
@@ -166,7 +176,7 @@ fn read_fields(map: &Compound) -> Vec<(&'static str, Value)> {
             ),
             (_, Tag::Int(value)) => Value::Int(*value),
             (_, Tag::Long(value)) => Value::Long(*value),
-            (_, Tag::String(value)) => Value::Text(value.to_string_lossy()),
+            (_, Tag::String(value)) => Value::Str(value.to_string_lossy()),
             _ => continue,
         };
         fields.push((key, value));
@@ -268,6 +278,19 @@ fn player_colony(host: &mut dyn ServerHost, player: PlayerRef) -> Option<([i32; 
     owned.or_else(|| nearest.map(|(_, hall, colony)| (hall, colony)))
 }
 
+/// The colony `player` **owns**, the only one they may manage. Reading a nearby
+/// colony (`player_colony`) is a neighbour's courtesy; renaming it, resizing it,
+/// hiring into it or reassigning its citizens is the owner's alone.
+fn owned_colony(host: &mut dyn ServerHost, player: PlayerRef) -> Option<([i32; 3], Colony)> {
+    let mine = uuid_text(player.uuid());
+    colonies(host)
+        .into_iter()
+        .find(|(_, colony)| may_manage(colony, &mine))
+}
+
+/// The refusal a management usage answers when the player owns no colony.
+const OWNER_ONLY: &str = "Only a colony's owner may manage it: found one with a town hall first.";
+
 // ---------------------------------------------------------------------------
 // Declaration: the block entity types and the citizen's Part
 // ---------------------------------------------------------------------------
@@ -276,7 +299,7 @@ fn player_colony(host: &mut dyn ServerHost, player: PlayerRef) -> Option<([i32; 
 /// declared block entity type, which is what creates their block entity (the retired bundle's
 /// `block_entity` hook). The colony itself is the `COLONY` attachment on that block entity.
 pub(crate) fn register(r: &mut dyn mod_api::Registrar) {
-    let _ = r
+    let hall = r
         .block_entity_type("town_hall")
         .blocks(&["blockhuttownhall"])
         .build();
@@ -287,7 +310,11 @@ pub(crate) fn register(r: &mut dyn mod_api::Registrar) {
     // Entity Parts are native-only: the API attaches code to an entity type, and a wasm mod
     // cannot (yet). A wasm build therefore registers the huts and has no citizen tick.
     #[cfg(not(target_arch = "wasm32"))]
-    r.entity_part(CITIZEN, crate::parts::CitizenWorker);
+    {
+        r.block_entity_part(&hall, crate::parts::TownHallWorker)
+            .expect("minecolonies: the town hall takes its Part");
+        r.entity_part(CITIZEN, crate::parts::CitizenWorker);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -380,34 +407,6 @@ pub(crate) fn on_entity_place(
     Flow::Continue
 }
 
-/// A level's tick ended on the server: completes the placements queued in that level. A
-/// level-scoped hook, because the colony is written through *this* level's attachment store
-/// (`server_tick` does not say which level the host holds).
-pub(crate) fn on_level_tick_post(host: &mut dyn ServerHost, level: LevelRef) {
-    // `level.dimension().id(host)` is the level's own dimension name; `server_tick` has no level.
-    let dimension = level.dimension().id(host);
-    let mut queue = PENDING
-        .lock()
-        .expect("the pending-placement queue is never poisoned by a panic-free push");
-    let mut due = Vec::new();
-    let mut waiting = Vec::new();
-    for mut item in std::mem::take(&mut *queue) {
-        if dimension.as_deref() == Some(item.dimension.as_str()) {
-            due.push(item);
-        } else {
-            item.misses += 1;
-            if item.misses < PENDING_MISSES {
-                waiting.push(item);
-            }
-        }
-    }
-    *queue = waiting;
-    drop(queue);
-    for item in due {
-        complete(host, level, item);
-    }
-}
-
 /// Stores a completed placement: the colony in a fresh town hall, the marker in a farmer's hut.
 fn complete(host: &mut dyn ServerHost, level: LevelRef, item: Pending) {
     let Some(block) = level.block(host, item.pos) else {
@@ -446,12 +445,262 @@ fn complete(host: &mut dyn ServerHost, level: LevelRef, item: Pending) {
     }
 }
 
+/// A level's tick ended on the server: completes the placements queued in that level, then
+/// applies the deliveries its workers made. A level-scoped hook, because the colony is written
+/// through *this* level's attachment store (`server_tick` does not say which level the host
+/// holds) and a block-entity write made *inside* a tick can be overwritten by that entity's own
+/// write-back (HANDOVER §9d) — so the chest is filled here, as a delta, not from the job's tick.
+pub(crate) fn on_level_tick_post(host: &mut dyn ServerHost, level: LevelRef) {
+    // `level.dimension().id(host)` is the level's own dimension name; `server_tick` has no level.
+    let dimension = level.dimension().id(host);
+    let mut queue = PENDING
+        .lock()
+        .expect("the pending-placement queue is never poisoned by a panic-free push");
+    let mut due = Vec::new();
+    let mut waiting = Vec::new();
+    for mut item in std::mem::take(&mut *queue) {
+        if dimension.as_deref() == Some(item.dimension.as_str()) {
+            due.push(item);
+        } else {
+            item.misses += 1;
+            if item.misses < PENDING_MISSES {
+                waiting.push(item);
+            }
+        }
+    }
+    *queue = waiting;
+    drop(queue);
+    for item in due {
+        complete(host, level, item);
+    }
+    flush_deliveries(host, level, dimension.as_deref());
+}
+
 // ---------------------------------------------------------------------------
-// The citizen's job tick
+// Deliveries: what a worker collected, applied at the end of that level's tick
 // ---------------------------------------------------------------------------
 
-/// A citizen ticked (the `EntityPart` this mod attaches to `minecolonies:citizen`): its job works
-/// if its colony resolves and it has one.
+/// One worker's delivery: the drops it collected and, for a felled tree, the sapling its stump
+/// gets back. Queued from the job tick and applied at that level's `level_tick_post`.
+struct Delivery {
+    dimension: String,
+    /// The colony chest the drops go into, and the sapling comes out of, when one stands near.
+    chest: Option<[i32; 3]>,
+    /// Where anything the chest cannot take falls, so a full chest loses nothing.
+    at: [i32; 3],
+    /// What the worker collected (`destroy_block`'s drops, not item entities).
+    items: Vec<ItemStack>,
+    /// The replant: the stump's position and the sapling item to take from the chest first.
+    replant: Option<([i32; 3], String)>,
+    /// Level ticks that did not match this delivery's dimension.
+    misses: u32,
+}
+
+/// Deliveries seen this tick, applied at the level's end.
+static DELIVERIES: Mutex<Vec<Delivery>> = Mutex::new(Vec::new());
+
+fn deliver(delivery: Delivery) {
+    DELIVERIES
+        .lock()
+        .expect("the delivery queue is never poisoned by a panic-free push")
+        .push(delivery);
+}
+
+/// Applies this level's deliveries: the sapling first (so a full chest can still replant), then
+/// the drops, with anything that does not fit falling at the worker's feet.
+fn flush_deliveries(host: &mut dyn ServerHost, level: LevelRef, dimension: Option<&str>) {
+    let mut queue = DELIVERIES
+        .lock()
+        .expect("the delivery queue is never poisoned by a panic-free push");
+    let mut due = Vec::new();
+    let mut waiting = Vec::new();
+    for mut item in std::mem::take(&mut *queue) {
+        if dimension == Some(item.dimension.as_str()) {
+            due.push(item);
+        } else {
+            item.misses += 1;
+            if item.misses < PENDING_MISSES {
+                waiting.push(item);
+            }
+        }
+    }
+    *queue = waiting;
+    drop(queue);
+    for item in due {
+        if let Some((stump, sapling)) = item.replant
+            && take_one(host, level, item.chest, &sapling)
+        {
+            plant(host, level, stump, &sapling);
+        }
+        let leftover = insert_drops(host, level, item.chest, &item.items);
+        for stack in leftover {
+            let _ = level.pop_resource(host, item.at, stack);
+        }
+    }
+}
+
+/// The nearest `minecraft:chest` inside the colony, within a worker's reach of its building:
+/// the colony's storage, which is where a worker's harvest goes and its saplings come from.
+/// (Upstream delivers to the worker's own building's rack; this slice has no building blocks
+/// beyond the farmer's hut, so one chest in the colony is the store — recorded in `notes.md`.)
+fn colony_chest(
+    host: &dyn Host,
+    level: LevelRef,
+    at: [f64; 3],
+    colony: &Colony,
+) -> Option<[i32; 3]> {
+    let chest: BlockKey = host.block_key(CHEST)?;
+    let centre = Pos::new(
+        at[0].floor() as i32,
+        at[1].floor() as i32,
+        at[2].floor() as i32,
+    );
+    let mut best: Option<(f64, [i32; 3])> = None;
+    for dx in -STORAGE_SEARCH..=STORAGE_SEARCH {
+        for dz in -STORAGE_SEARCH..=STORAGE_SEARCH {
+            for dy in -STORAGE_HEIGHT..=STORAGE_HEIGHT {
+                let pos = Pos::new(centre.x + dx, centre.y + dy, centre.z + dz);
+                if !colony.contains(pos) {
+                    continue;
+                }
+                let block = [pos.x, pos.y, pos.z];
+                if level.block(host, block) != Some(chest) {
+                    continue;
+                }
+                let distance = horizontal_distance(centre, pos);
+                if best.is_none_or(|(near, _)| distance < near) {
+                    best = Some((distance, block));
+                }
+            }
+        }
+    }
+    best.map(|(_, pos)| pos)
+}
+
+/// Puts `items` into the chest, answering what did not fit. No chest (or no storage) keeps
+/// everything, which the caller drops.
+fn insert_drops(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    chest: Option<[i32; 3]>,
+    items: &[ItemStack],
+) -> Vec<ItemStack> {
+    let Some(chest) = chest else {
+        return items.to_vec();
+    };
+    let mut left = items.to_vec();
+    let won = host
+        .transaction(|host, tx| {
+            let Some(storage) = level.capability(host, &mod_api::STORAGE, chest, None) else {
+                return Ok::<bool, ()>(false);
+            };
+            let mut rest = Vec::new();
+            for stack in left.drain(..) {
+                let resource = ItemResource::of(&stack);
+                let count = u64::from(stack.count());
+                let put = u32::try_from(storage.insert(host, tx, &resource, count)).unwrap_or(0);
+                if let Some(remainder) = stack.shrink(put) {
+                    rest.push(remainder);
+                }
+            }
+            left = rest;
+            Ok(true)
+        })
+        .unwrap_or(false);
+    if !won {
+        return items.to_vec();
+    }
+    left
+}
+
+/// Takes one `item` out of the chest: whether the colony's storage had one to replant with.
+fn take_one(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    chest: Option<[i32; 3]>,
+    item: &str,
+) -> bool {
+    let Some(chest) = chest else {
+        return false;
+    };
+    let Some(key) = item_key(host, item) else {
+        return false;
+    };
+    let resource = ItemResource::of(&ItemStack::of(key));
+    host.transaction(|host, tx| {
+        let Some(storage) = level.capability(host, &mod_api::STORAGE, chest, None) else {
+            return Ok::<bool, ()>(false);
+        };
+        Ok(storage.extract(host, tx, &resource, 1) >= 1)
+    })
+    .unwrap_or(false)
+}
+
+/// Plants a sapling on the stump's soil, when the soil grows one and the stump's cell is free.
+fn plant(host: &mut dyn ServerHost, level: LevelRef, stump: [i32; 3], sapling: &str) {
+    let soil = level
+        .block(host, [stump[0], stump[1] - 1, stump[2]])
+        .map(|block| block.id(host));
+    if !soil.as_deref().is_some_and(grows_a_sapling) {
+        return;
+    }
+    if level
+        .block(host, stump)
+        .map(|block| block.id(host))
+        .as_deref()
+        != Some(AIR)
+    {
+        return;
+    }
+    let Some(state) = host.block_state_id(sapling) else {
+        return;
+    };
+    let _ = level.set_block(
+        host,
+        stump,
+        state,
+        BlockUpdateFlags::NEIGHBORS | BlockUpdateFlags::CLIENTS,
+    );
+}
+
+/// An item key from its id, when the game knows the item.
+fn item_key(host: &dyn Host, id: &str) -> Option<mod_api::ItemKey> {
+    let identifier = Identifier::parse(id).ok()?;
+    host.item_key(&identifier)
+}
+
+/// A town hall ticked: step its colony's citizens' jobs. See `parts::TownHallWorker` for why
+/// the hall drives them (a vanilla-family entity type hears no `general_entity_tick` at this
+/// pin). The colony is read back from the store at the hall's own position, which the tick has.
+pub(crate) fn on_hall_tick(host: &mut dyn ServerHost, pos: [i32; 3]) {
+    let Some(colony) = COLONY
+        .get_existing(host.attachments(), Holder::BlockEntity(pos))
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+    let Some(level) = host
+        .levels()
+        .list_levels()
+        .into_iter()
+        .find(|level| level.in_place(host))
+    else {
+        return;
+    };
+    for citizen in &colony.citizens {
+        let Some(uuid) = uuid_value(&citizen.id) else {
+            continue;
+        };
+        let Some(entity) = host.entity_by_uuid(mod_api::EntityUuid(uuid)) else {
+            continue;
+        };
+        step_job(host, entity, level, pos, &colony);
+    }
+}
+
+/// A citizen ticked through its entity Part: resolve its colony by tag and step the job.
+/// (The hall's tick uses `on_hall_tick`, which reads its own colony.)
 pub(crate) fn on_citizen_tick(host: &mut dyn ServerHost, entity: EntityRef) {
     let Some(level) = entity.level(host) else {
         return;
@@ -459,36 +708,78 @@ pub(crate) fn on_citizen_tick(host: &mut dyn ServerHost, entity: EntityRef) {
     let Some(tags) = entity.tags(host) else {
         return;
     };
-    // A citizen with no colony tag does nothing at all.
     let Some(colony_id) = read_colony_tag(&tags) else {
         return;
     };
-    let Some((hall, mut colony)) = hall_by_id(host, colony_id) else {
+    let Some((hall, colony)) = hall_by_id(host, colony_id) else {
         return;
     };
+    step_job(host, entity, level, hall, &colony);
+}
+
+/// One citizen's job step: the job's own delay, its building when it has one, then the job.
+fn step_job(
+    host: &mut dyn ServerHost,
+    entity: EntityRef,
+    level: LevelRef,
+    hall: [i32; 3],
+    colony: &Colony,
+) {
     let Some(uuid) = entity.uuid(host) else {
         return;
     };
     let Some(job) = colony.citizen(&uuid_text(uuid)).map(|citizen| citizen.job) else {
         return;
     };
-    if job != Job::Farmer {
+    let Some(delay) = job.delay() else {
         return;
-    }
-    // The job needs its building: a farmer works only where the colony has a farmer's hut.
-    if !has_farmers_hut(host, &colony) {
+    };
+    // A job that needs its building does not work without it (upstream's `AbstractJob` has a
+    // building per job; only the farmer's hut exists in this slice).
+    if job.building().is_some() && !has_farmers_hut(host, colony) {
         return;
     }
     let Some(now) = level.game_time(host) else {
         return;
     };
-    if !should_work(now, entity.id(), FARMER_DELAY_TICKS) {
+    if !should_work(now, entity.id(), delay) {
         return;
     }
+    match job {
+        Job::Farmer => farmer_work(host, entity, level, hall, colony),
+        Job::Lumberjack => lumberjack_work(host, entity, level, hall, colony),
+        Job::Miner => miner_work(host, entity, level, hall, colony),
+        Job::Unemployed => {}
+    }
+}
+
+/// Applies `change` to the colony as it stands *now* at `hall`, then writes it back. A worker's
+/// counter is a delta on the live record, so two citizens that work on the same tick cannot lose
+/// each other's increment (HANDOVER §9d: a write is applied as a delta, not from a stale copy).
+fn bump_colony(host: &mut dyn ServerHost, hall: [i32; 3], change: impl FnOnce(&mut Colony)) {
+    let Some(mut colony) = COLONY
+        .get_existing(host.attachments(), Holder::BlockEntity(hall))
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+    change(&mut colony);
+    write_colony(host, hall, &colony);
+}
+
+/// The farmer's work tick: walk to the nearest mature crop, harvest it and leave it replanted.
+fn farmer_work(
+    host: &mut dyn ServerHost,
+    entity: EntityRef,
+    level: LevelRef,
+    hall: [i32; 3],
+    colony: &Colony,
+) {
     let Some(at) = entity.position(host) else {
         return;
     };
-    let Some(crop) = nearest_mature_crop(host, level, at, &colony) else {
+    let Some(crop) = nearest_mature_crop(host, level, at, colony) else {
         return;
     };
     match farmer_step(at, Some(crop), FARMER_REACH) {
@@ -499,12 +790,164 @@ pub(crate) fn on_citizen_tick(host: &mut dyn ServerHost, entity: EntityRef) {
         Some(Step::Harvest(at_crop)) => {
             let pos = [at_crop.x, at_crop.y, at_crop.z];
             if host.set_block_property(pos, "age", WHEAT_REPLANT_AGE) {
-                colony.harvest();
-                write_colony(host, hall, &colony);
+                bump_colony(host, hall, Colony::harvest);
             }
         }
-        None => {}
+        None | Some(Step::Fell(_)) => {}
     }
+}
+
+/// The lumberjack's work tick: find the tree nearest to it inside the colony, walk to it and
+/// fell one log — the highest one first. The last log puts a sapling back on the stump's soil
+/// when the colony's chest holds one (upstream's lumberjack replants from its own inventory).
+fn lumberjack_work(
+    host: &mut dyn ServerHost,
+    entity: EntityRef,
+    level: LevelRef,
+    hall: [i32; 3],
+    colony: &Colony,
+) {
+    let Some(at) = entity.position(host) else {
+        return;
+    };
+    let Some(tree) = nearest_tree(host, level, at, colony) else {
+        return;
+    };
+    if tree.is_empty() {
+        return;
+    }
+    match lumberjack_step(at, Some(&tree), LUMBERJACK_REACH) {
+        Some(Step::Walk(to)) => {
+            entity.teleport_to(host, to, None);
+        }
+        Some(Step::Fell(log)) => {
+            let pos = [log.x, log.y, log.z];
+            let Ok(drops) = level.destroy_block(host, pos, true, None, true) else {
+                return;
+            };
+            let Some(drops) = drops else {
+                return;
+            };
+            bump_colony(host, hall, |colony| colony.count_felled(1));
+            // The last log is the stump: its soil gets the tree's sapling back, if there is one.
+            let replant = if tree.len() == 1 {
+                tree.stump()
+                    .zip(sapling_for(&tree.log))
+                    .map(|(stump, sapling)| ([stump.x, stump.y, stump.z], sapling))
+            } else {
+                None
+            };
+            let chest = colony_chest(host, level, at, colony);
+            deliver(Delivery {
+                dimension: host.dimension().to_owned(),
+                chest,
+                at: [
+                    at[0].floor() as i32,
+                    at[1].floor() as i32,
+                    at[2].floor() as i32,
+                ],
+                items: drops,
+                replant,
+                misses: 0,
+            });
+        }
+        _ => {}
+    }
+}
+
+/// The miner's work tick: break the first block under the shaft it stands over, one per tick,
+/// and deliver the drops. It stops at bedrock, at water or lava, at the world floor and outside
+/// the colony (`runtime::miner_next`).
+fn miner_work(
+    host: &mut dyn ServerHost,
+    entity: EntityRef,
+    level: LevelRef,
+    hall: [i32; 3],
+    colony: &Colony,
+) {
+    let Some(at) = entity.position(host) else {
+        return;
+    };
+    let stand = Pos::new(
+        at[0].floor() as i32,
+        at[1].floor() as i32,
+        at[2].floor() as i32,
+    );
+    let floor = level.height(host).map_or(i32::MIN, |(min, _)| min);
+    match miner_next(stand, colony, floor, |pos| {
+        level
+            .block(host, [pos.x, pos.y, pos.z])
+            .map(|block| block.id(host))
+    }) {
+        crate::runtime::Mining::Next(block) => {
+            let pos = [block.x, block.y, block.z];
+            let Ok(drops) = level.destroy_block(host, pos, true, None, true) else {
+                return;
+            };
+            let Some(drops) = drops else {
+                return;
+            };
+            bump_colony(host, hall, |colony| colony.count_dug(1));
+            let chest = colony_chest(host, level, at, colony);
+            deliver(Delivery {
+                dimension: host.dimension().to_owned(),
+                chest,
+                at: [
+                    at[0].floor() as i32,
+                    at[1].floor() as i32,
+                    at[2].floor() as i32,
+                ],
+                items: drops,
+                replant: None,
+                misses: 0,
+            });
+        }
+        crate::runtime::Mining::Stop(_) => {}
+    }
+}
+
+/// The tree nearest to `at` inside the colony: the log, its whole connected cluster.
+fn nearest_tree(
+    host: &dyn Host,
+    level: LevelRef,
+    at: [f64; 3],
+    colony: &Colony,
+) -> Option<crate::runtime::Tree> {
+    let centre = Pos::new(
+        at[0].floor() as i32,
+        at[1].floor() as i32,
+        at[2].floor() as i32,
+    );
+    let mut best: Option<(f64, Pos, String)> = None;
+    for dx in -LUMBERJACK_SEARCH..=LUMBERJACK_SEARCH {
+        for dz in -LUMBERJACK_SEARCH..=LUMBERJACK_SEARCH {
+            for dy in -LOG_SCAN_HEIGHT..=LOG_SCAN_HEIGHT {
+                let pos = Pos::new(centre.x + dx, centre.y + dy, centre.z + dz);
+                if !colony.contains(pos) {
+                    continue;
+                }
+                let Some(id) = level
+                    .block(host, [pos.x, pos.y, pos.z])
+                    .map(|block| block.id(host))
+                else {
+                    continue;
+                };
+                if !is_log(&id) {
+                    continue;
+                }
+                let distance = horizontal_distance(centre, pos);
+                if best.as_ref().is_none_or(|(near, _, _)| distance < *near) {
+                    best = Some((distance, pos, id));
+                }
+            }
+        }
+    }
+    let (_, seed, log) = best?;
+    Some(tree_at(seed, &log, |pos| {
+        level
+            .block(host, [pos.x, pos.y, pos.z])
+            .map(|block| block.id(host))
+    }))
 }
 
 /// The colony's nearest mature wheat around `at`, all of it inside the colony.
@@ -663,8 +1106,8 @@ fn info(host: &mut dyn ServerHost, player: PlayerRef) {
 }
 
 fn rename(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEvent<'_>) {
-    let Some((hall, mut colony)) = player_colony(host, player) else {
-        no_colony(host);
+    let Some((hall, mut colony)) = owned_colony(host, player) else {
+        feedback(host, OWNER_ONLY.to_owned());
         return;
     };
     let Some(name) = text_argument(event, "name") else {
@@ -682,8 +1125,8 @@ fn rename(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEve
 }
 
 fn radius(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEvent<'_>) {
-    let Some((hall, mut colony)) = player_colony(host, player) else {
-        no_colony(host);
+    let Some((hall, mut colony)) = owned_colony(host, player) else {
+        feedback(host, OWNER_ONLY.to_owned());
         return;
     };
     let Some(CommandArgumentValue::Integer(chunks)) = event.command.argument("chunks") else {
@@ -729,10 +1172,16 @@ fn list(host: &mut dyn ServerHost, player: PlayerRef) {
 }
 
 fn hire(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEvent<'_>) {
-    let Some((hall, mut colony)) = player_colony(host, player) else {
-        no_colony(host);
+    let Some((hall, mut colony)) = owned_colony(host, player) else {
+        feedback(host, OWNER_ONLY.to_owned());
         return;
     };
+    // A hire spawns a persistent mob and saves a roster row: the cap is what bounds
+    // both, and it is checked before a mob exists.
+    if let Some(refusal) = hire_refusal(&colony) {
+        feedback(host, format!("{refusal}."));
+        return;
+    }
     let name = text_argument(event, "name")
         .unwrap_or_else(|| NAMES[colony.citizens.len() % NAMES.len()].to_owned());
     let spawn = spawn_point(hall, colony.citizens.len());
@@ -781,7 +1230,7 @@ fn hire(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEvent
     feedback(
         host,
         format!(
-            "{name} joined {} ({} citizens). Give them a job: /minecolonies job assign {name} farmer.",
+            "{name} joined {} ({} citizens). Give them a job: /minecolonies job assign {name} farmer|lumberjack|miner.",
             colony.name,
             colony.citizens.len()
         ),
@@ -806,19 +1255,21 @@ fn info_of(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEv
     feedback(
         host,
         format!(
-            "{}: job {}, colony {} ({} crops harvested), farmer's hut {}.",
+            "{}: job {}, colony {} ({} crops harvested), {} logs felled, {} blocks mined, farmer's hut {}.",
             citizen.name,
             citizen.job.label(),
             colony.name,
             colony.harvested,
+            colony.felled,
+            colony.dug,
             if hut { "present" } else { "missing" }
         ),
     );
 }
 
 fn assign(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEvent<'_>) {
-    let Some((hall, mut colony)) = player_colony(host, player) else {
-        no_colony(host);
+    let Some((hall, mut colony)) = owned_colony(host, player) else {
+        feedback(host, OWNER_ONLY.to_owned());
         return;
     };
     let (Some(who), Some(job_id)) = (word_argument(event, "citizen"), word_argument(event, "job"))
@@ -833,7 +1284,7 @@ fn assign(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEve
     let Some(job) = Job::from_id(&job_id) else {
         feedback(
             host,
-            format!("This slice has one job: farmer. {job_id} is not ported."),
+            format!("Unknown job {job_id}: the colony's jobs are farmer, lumberjack and miner."),
         );
         return;
     };
@@ -890,7 +1341,7 @@ fn citizen_index(colony: &Colony, who: &str) -> Option<usize> {
 
 fn colony_summary(colony: &Colony) -> String {
     let mut line = format!(
-        "Colony {} (id {}, owner {}): centre {}, {} blocks ({} chunks), {} citizens, {} crops harvested, founded at tick {}.",
+        "Colony {} (id {}, owner {}): centre {}, {} blocks ({} chunks), {} citizens, {} crops harvested, {} logs felled, {} blocks mined, founded at tick {}.",
         colony.name,
         colony.id,
         colony.owner_name,
@@ -899,6 +1350,8 @@ fn colony_summary(colony: &Colony) -> String {
         colony.size_chunks,
         colony.citizens.len(),
         colony.harvested,
+        colony.felled,
+        colony.dug,
         colony.founded
     );
     if colony.citizens.is_empty() {
@@ -916,6 +1369,14 @@ fn colony_summary(colony: &Colony) -> String {
 }
 
 /// A UUID's text form, as `/data` prints one.
+fn uuid_value(text: &str) -> Option<u128> {
+    let hex: String = text.chars().filter(|character| *character != '-').collect();
+    if hex.len() != 32 {
+        return None;
+    }
+    u128::from_str_radix(&hex, 16).ok()
+}
+
 fn uuid_text(uuid: u128) -> String {
     let hex = format!("{uuid:032x}");
     format!(
@@ -926,4 +1387,18 @@ fn uuid_text(uuid: u128) -> String {
         &hex[16..20],
         &hex[20..32]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_roster_id_round_trips_to_the_entity_uuid() {
+        // The roster saves the hyphenated text; `EntityUuid` takes the raw 128-bit value.
+        let uuid = 0x0123_4567_89ab_cdef_0011_2233_4455_6677;
+        assert_eq!(uuid_value(&uuid_text(uuid)), Some(uuid));
+        assert_eq!(uuid_value("not-a-uuid"), None);
+        assert_eq!(uuid_value("0123456789abcdef"), None);
+    }
 }

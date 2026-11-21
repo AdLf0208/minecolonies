@@ -158,12 +158,17 @@ def data_files() -> dict[str, bytes]:
             "result": {"count": 1, "id": f"{MOD}:blockhutfarmer"},
         }
     )
+    # Upstream's scythe is not a crafting-table recipe at all (the jar carries none; the
+    # builder's crafter recipes make the tools), so this shape is the port's own. Its first
+    # version was `II `/` S `/` S ` — exactly vanilla's iron hoe, which shadowed it and made the
+    # scythe uncraftable (measured in game 2026-11-21, the `constructionstick` class). The same
+    # two iron and two sticks in a shape no vanilla recipe owns: the blade split, the shaft below.
     out[f"data/{MOD}/recipe/scythe.json"] = j(
         {
             "type": "minecraft:crafting_shaped",
             "category": "equipment",
             "key": {"I": "minecraft:iron_ingot", "S": "minecraft:stick"},
-            "pattern": ["II ", " S ", " S "],
+            "pattern": ["I I", " S ", " S "],
             "result": {"count": 1, "id": f"{MOD}:scythe"},
         }
     )
