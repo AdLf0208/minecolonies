@@ -1,5 +1,7 @@
-//! MineColonies for Horizon — slice 1: a town hall founds a colony, one citizen joins it and
-//! farms, and `/minecolonies colony|citizen|job` is the configuration surface.
+//! MineColonies for Horizon — slices 1–4: a town hall founds a colony, one citizen joins it and
+//! farms, a lumberjack and a miner work their own buildings, each worker's trade tool is a
+//! request the colony's chest fulfils, and `/minecolonies colony|citizen|job|requests` is the
+//! configuration surface.
 //!
 //! The one `impl Hooks` at the crate root: every method is a *moment* the game tells mods
 //! about, and each forwards to `support` (the game-side glue) or, through it, to `runtime` (the
@@ -7,11 +9,11 @@
 //!
 //! | moment | what this port does |
 //! |---|---|
-//! | `register` | declares the two hut block entity types; attaches the citizen's `EntityPart` |
+//! | `register` | declares the hut block entity types; attaches the hall's and the citizen's Parts |
 //! | `entity_place` | refuses a town hall that may not found a colony (the only cancel point) |
-//! | `level_tick_post` (server) | completes a placement's colony / hut marker, one tick later |
+//! | `level_tick_post` (server) | completes a placement, takes a requested tool, applies deliveries |
 //! | `register_commands` | `/minecolonies …` and the mod's own `mc` alias |
-//! | `run_mod_command` | runs a parsed `/minecolonies …` usage |
+//! | `run_mod_command` | runs a parsed `/minecolonies …` usage, `requests` included |
 //!
 //! The citizen's job is **not** a global hook: it is the `EntityPart` in `parts`, called for
 //! `minecolonies:citizen` rows only. The colony is **not** a global scan either: it is one

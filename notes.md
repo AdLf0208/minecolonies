@@ -1,5 +1,5 @@
-# MineColonies — slices 1–3: town hall → colony → citizens → farmer, lumberjack, miner, and
-the two jobs' buildings
+# MineColonies — slices 1–4: town hall → colony → citizens → farmer, lumberjack, miner, the two
+# jobs' buildings, and the tool request
 
 **Class:** `content` · **Tier:** `deep` · **Role:** core · **Priority:** P0 · in ATM10.
 Ported from **MineColonies** `1.1.1411-1.21.1-snapshot`, jar
@@ -8,7 +8,7 @@ Ported from **MineColonies** `1.1.1411-1.21.1-snapshot`, jar
 upstream `ldtteam/minecolonies` branch `version/main`, commit
 `3438c06fc92947b28bbd2fda29f00e207b967a22`.
 
-**Format (2026-11-18):** the flat **SDK package** (mod API `0.2`), version **0.2.5** — one
+**Format (2026-11-18):** the flat **SDK package** (mod API `0.2`), version **0.2.6** — one
 `.hmod` carrying `horizon-mod.toml`, `src/`, `assets/`, `data/` and the licence files. Pin:
 Horizon **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** (Nightly 2026-11-20), horizon-mixins
 **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`**, SDK surface `e0563779…`, package format 6.
@@ -217,6 +217,138 @@ Both new recipes are crafted in a real table with their ingredients consumed
   lumberjack's hut with a stick where the axe goes -> null
 ```
 
+### Slice 4 — the tool request: every job's trade tool, taken from the colony's chest (0.2.5 → 0.2.6)
+
+The gap line this slice closes (`## Gaps`, as it stood before it):
+
+> The other ~35 jobs (builder, guard, crafter, cook, …), … **the request system**, raids,
+> permissions and ranks …
+
+and, from the deviations, *"the scythe is a plain item with no harvest behaviour of its own (the
+job does the harvesting)"*. The first family of upstream's request system is the **tool request**:
+a job declares the tool it needs, a worker without it does not work, the colony records the
+request, and a tool the colony holds is taken into the citizen's one held slot. It gives the
+carried `minecolonies:scythe` its first behaviour (the farmer's trade tool). It fits `deep`
+without growing the shape — one more rule in `runtime`, one equipment read/write and one deferred
+pickup in the glue, one optional record field and one command.
+
+Required behaviour, from upstream's own data and its request classes (implemented, not copied):
+
+| Rule | Source |
+|---|---|
+| The tool classes are `axe`, `pickaxe` and `hoe`; a request names a class **and a minimum level** (`Tool of class:` / `with minimal level:`), and the levels are `0` Wood/Gold … `2` Iron | `assets/minecolonies/lang/en_us.json`: `com.minecolonies.coremod.tooltype.*`, `com.minecolonies.coremod.request.tool.pretype` / `.preminlevel`, `com.minecolonies.coremod.toollevel.2` |
+| A failed tool need is a **`ToolRequest`** in the colony's request system, not a silent stall | `com/minecolonies/core/colony/requestsystem/requests/StandardRequests$ToolRequest.class` |
+| A citizen's tools live in its **equipment**, and the hand is the slot a job reads | vanilla `LivingEntity.getItemBySlot(EquipmentSlot.MAINHAND)`; the pin's `LivingRef::hand_item` / `set_hand_item` (`living.rs:195-199`, `:533`) |
+| A worker's tool arrives from the colony's store, not from the worker's own pocket | the port's 0.2.4 rule (the colony's chest is the citizen's store); a citizen has no inventory |
+| A job's building and its tool are both prerequisites of the job's rule | `AbstractJob`/`AbstractBuilding` (the building) and `ToolRequest` (the tool) |
+
+The job's tool in this port, one concrete item per job (upstream asks for a class and a level; a
+colony at one tier names the item the readout prints):
+
+| Job | Tool | Why |
+|---|---|---|
+| `farmer` | `minecolonies:scythe` | the tool the port carries for the farmer; the id the readout prints |
+| `lumberjack` | `minecraft:iron_axe` | the axe class (`tooltype.axe`), iron level (`toollevel.2`) |
+| `miner` | `minecraft:iron_pickaxe` | the pickaxe class (`tooltype.pickaxe`), the same level |
+
+**TDD, in the order the ruling asks for.** The rules live in `runtime.rs` (pure), so the failing
+tests came first — nine of them, with the new rules as `panic!()`/`unimplemented!()` bodies and the
+record field not yet written:
+
+```
+$ cargo test --offline
+---- runtime::tests::every_working_job_names_the_tool_its_rule_needs stdout ----
+thread 'runtime::tests::every_working_job_names_the_tool_its_rule_needs' panicked at src/runtime.rs:358:9:
+a job's tool
+---- runtime::tests::a_job_without_its_tool_does_not_work stdout ----
+thread 'runtime::tests::a_job_without_its_tool_does_not_work' panicked at src/runtime.rs:412:5:
+not implemented: a job's tool
+---- runtime::tests::job_info_reports_the_hand stdout ----
+thread 'runtime::tests::job_info_reports_the_hand' panicked at src/runtime.rs:420:5:
+not implemented: the citizen's hand
+---- runtime::tests::the_request_line_reads_the_way_the_command_says_it stdout ----
+thread 'runtime::tests::the_request_line_reads_the_way_the_command_says_it' panicked at src/runtime.rs:427:5:
+not implemented: the colony's requests
+...
+test result: FAILED. 59 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+(`ports/_shared/evidence/minecolonies/sdk-test-slice4-red.log`; the nine are the five new rules,
+the request list's three, the record's new field and the support round trip.) Then the rules, the
+glue and the in-game assertions; `sdk-test.log` is the green run: **68 tests**.
+
+**What changed in the rules** (`src/runtime.rs`):
+
+- `Tool { job, item }`, `LUMBERJACK_TOOL`/`MINER_TOOL`/`FARMER_TOOL`, `Job::tool()`;
+- `tool_missing(job, held)` — the job's rule does not run without its item;
+- `hand_status(job, held)` — `holding minecraft:iron_axe` / `holding nothing` /
+  `holding X, not Y` / `no tool`;
+- `Request { citizen, name, job, item }`, `Colony::{request, settle, open_request}`
+  (`request` answers whether the record changed, so an unchanged request is not rewritten every
+  40 ticks), and `requests_line` / `requests_status` for the two readouts;
+- the record's `Requests` field, **optional on read** (a 0.2.5 colony loads with none) and written
+  as a list of `{Citizen, Name, Job, Item}` compounds.
+
+**What changed in the glue** (`src/support.rs`):
+
+- `step_job` reads the citizen's main hand (`LivingRef::hand_item`), and a job whose tool is not
+  there records the request and **returns before the walk/harvest/fell/dig**;
+- the pickup is a **queue applied at `level_tick_post`** (`Pickup`), because a block-entity write
+  made inside a tick is overwritten by that entity's own write-back — the same rule the deliveries
+  follow. The tool is extracted from the colony's chest and written with
+  `LivingRef::set_hand_item(host, Hand::Main, …)`; the request is settled in the same flush. A hand
+  write that fails puts the tool back in the store (and on the ground if the store cannot take
+  it), so a failed write never loses the item;
+- `job info` appends the hand, `colony info` appends `N requests open`, `citizen list` appends
+  `, needs <item>` for a citizen with an open request, and `/minecolonies requests` reconciles the
+  record against the live hands before it prints (so a row whose tool arrived cannot survive a
+  read). `job assign` drops the previous job's request;
+- `read_fields` now lists **`Felled`**, **`Dug`** and `Requests`: see the port defect below.
+
+**The harness's assertions** (`tools/e2e.sh` H, I, K, L1–L3, M1, at `0a875da`):
+
+```
+== H: the job's tool is a request, then it is taken from the colony's chest ==
+  Ada: job Unemployed, …, no building, no tool.
+  Ada: job Farmer, …, farmer's hut present, holding nothing.
+  1 request: Ada needs minecolonies:scythe
+  the unarmed farmer left the mature crop at age 7 and the request open
+  Ada: job Farmer, …, farmer's hut present, holding minecolonies:scythe.
+  the scythe left the chest for Ada's hand and the request cleared
+== K: the colony survives quit and relaunch ==
+  Ada: job Farmer, …, farmer's hut present, holding minecolonies:scythe.      (after the relaunch)
+== L2: the hut is placed, the tool is requested, then taken, and the tree falls ==
+  Bo: job Lumberjack, …, lumberjack's hut present, holding nothing.
+  1 request: Bo needs minecraft:iron_axe
+  without an axe the tree is whole and Bo's request is open
+  Bo: job Lumberjack, …, lumberjack's hut present, holding minecraft:iron_axe.
+  the axe left the chest for Bo's hand and the request cleared
+  after the fell: soil at 2004,101,-1 is 'minecraft:dirt', stump is 'minecraft:oak_sapling',
+    chest [{"count":4,"item":"minecraft:oak_log"}]
+== M1: the mine is the miner's building, and the pickaxe is its tool ==
+  Cass: job Miner, …, mine present, holding nothing.
+  1 request: Cass needs minecraft:iron_pickaxe
+  without a pickaxe the column is whole and Cass's request is open
+  Cass: job Miner, …, mine present, holding minecraft:iron_pickaxe.
+  the pickaxe left the chest for Cass's hand and the request cleared
+```
+
+Every tool leg has its counterfactual **before** the tool arrives (the mature crop stays at age 7,
+the four-log tree stays whole, the eight-block column stays whole), and the "held" read is
+inverted by `TOOL_SELFTEST=1` — the run then fails at
+`selftest: Ada holds minecolonies:scythe, so the hand was written`, so a port whose equipment write
+silently did nothing passes the inverted leg and fails the normal one. `SELFTEST=1` inverts both
+that leg and the miner's depth; `MINER_SELFTEST=1` inverts the depth alone.
+
+**Port defect fixed in this slice.** The saved colony record was **losing its `Felled` and `Dug`
+counters on every read**: `colony_fields` wrote both (0.2.4), the codec's `read_fields` did not
+list their keys, and `colony_from_fields` reads an absent counter as zero — so a colony that had
+felled 8 logs read 0 after a relaunch. It was invisible in 0.2.5 because `bump_colony` reads the
+live attachment (not the saved compound), so only the load path was affected. The support test
+`a_colony_round_trips_through_its_saved_compound` (encode → decode) is the failing test that
+pins the whole record, `Felled`/`Dug`/`Requests` included; it failed before the `read_fields`
+repair. Not an upstream defect — this port's own decoder — so there is nothing to report upstream.
+
 ### Behaviour, and where it was read
 
 | Rule | Source |
@@ -232,6 +364,10 @@ Both new recipes are crafted in a real table with their ingredients consumed
 | Citizen base health 20; full saturation 60; the entity carries its colony id and a custom name | `CitizenConstants.java:84`; `ICitizenData.java:30`; `CitizenData.java:552-560` |
 | One colony per player | `CreateColonyMessage.java:172-183` |
 | Command roots `minecolonies` (alias `mc`), subcommands `colony` and `citizens` | `EntryPoint.java:86-132` |
+| A job's tool is a request with a class **and a minimum level**; a tool need that cannot be met is a `ToolRequest` in the colony's request system | `en_us.json` `tooltype.*`/`toollevel.*`/`request.tool.pretype`; `StandardRequests$ToolRequest.class` |
+| A citizen's tools are its **equipment**; the hand is the slot a job reads, and it saves with the entity | `LivingEntity.getItemBySlot(MAINHAND)`; the pin's `LivingRef::hand_item`/`set_hand_item` |
+| A worker does not do its job without its trade tool (the building and the tool are both prerequisites) | `AbstractJob`/`AbstractBuilding` plus the `ToolRequest`; the port's rule |
+| The colony's request list is what a readout shows, and a request that can be met is not left open | the port's `StandardRequests$ToolRequest` reading, narrowed to the tool family |
 
 ## Generated art (the palette and the templates)
 
@@ -287,9 +423,15 @@ renderer: the citizen draws with its villager template's model (a gap, below).
   the citizen's job is one entity type's moment, not a global hook.
 - **A broken hut**: `Hooks::player_destroyed_block` (a player's break, after the removal) drops the
   `HUT` marker at that position, so a colony never claims a building that is not standing.
+- **The held tool**: `LivingRef::hand_item(host, Hand::Main)` reads the citizen's one held slot and
+  `LivingRef::set_hand_item` writes it (the handle's methods, not the host trait — the `living_*`
+  methods on the host traits are the hidden backend). The read happens in the job tick; the
+  **write and the chest extraction** are a `Pickup` queue applied at `level_tick_post`, because a
+  block-entity write inside a tick is overwritten by that entity's own write-back.
 - **Commands**: `Hooks::register_commands` pushes `Command::new("<usage>")` usages;
   `Hooks::run_mod_command` receives the **parsed** invocation (literals + typed arguments) instead
-  of a raw line.
+  of a raw line. `/minecolonies requests` reads the record's open requests after reconciling them
+  with the live hands.
 
 ## Migration to the SDK format
 
@@ -453,6 +595,24 @@ cargo output.
   content type missing) does **not** farm: a Part attached to a vanilla family hears no
   `general_entity_tick`. The fallback exists so a missing content half is visible (the harness
   asserts the entity's type) rather than silent.
+- **New in 0.2.6 (slice 4):** a tool request names **one concrete item** per job, not upstream's
+  "class + minimum level": the colony carries one tier (iron; the farmer's scythe), so
+  `Tool { job, item }` is the whole request and the readout prints the item. A colony that carried
+  several tiers would need the class/level form.
+- **New in 0.2.6 (slice 4):** the **colony's chest is also the tool store**. Upstream asks the
+  colony's request system, which a builder/rack/delivery chain fulfils; this port has no racks, so
+  the one chest the 0.2.4 slice already made the worker's delivery point is where a requested tool
+  comes from. The citizen takes it into its **main-hand slot** (`living_set_hand_item`), which is
+  the one held slot this slice models; there is no second hand, backpack or tool damage.
+- **New in 0.2.6 (slice 4):** the request list is **the colony record's**, reconciled against the
+  live hands by `/minecolonies requests` (and refreshed by each job tick) rather than by upstream's
+  standalone request manager — the record is what saves with the hall, and the readout is its
+  repair point. Only the **tool** family is ported: deliveries, crafting, food, pickups and the
+  request GUI stay gaps.
+- **New in 0.2.6 (slice 4):** a tool is taken at `level_tick_post`, one tick after the request, not
+  in the same tick: the extraction writes the colony's chest, and a block-entity write inside a
+  tick is overwritten by that entity's own write-back (the delivery rule from 0.2.2). The hand write
+  could happen at once, but the chest cannot.
 
 ## Upstream defects fixed
 
@@ -508,13 +668,15 @@ The table is the record the parity rule asks for: a family is `tested` in game t
 | `minecolonies:blocks/blockhutlumberjack` | tested | L3: a player's break removes it and drops it — the same declared shape and the same axe tag |
 | `minecolonies:blocks/blockhutminer` | tested | M1: placed and read back; same declared shape, same axe tag |
 | `minecolonies:entities/citizen` | tested | G/M: hired, counted live, and the roster is read back; the citizen entity type is what the hire spawns |
-| `minecolonies:scythe` | tested | N: crafted in a real table, read back from the inventory; the recipe is the same id |
+| `minecolonies:scythe` | tested | N: crafted in a real table, read back from the inventory; H: it is the **farmer's trade tool** — no scythe in the hand leaves the mature crop at age 7 and `/minecolonies requests` reads `1 request: Ada needs minecolonies:scythe`; the scythe in the chest is taken into the hand, the request clears, and the harvest runs; K: the hand survives the relaunch |
+| `tool_request` | tested | H: `1 request: Ada needs minecolonies:scythe` → `requests: none`; L2: `1 request: Bo needs minecraft:iron_axe` → the axe in the hand → `requests: none`, and the tree is whole until it arrives; M1: the same for `minecraft:iron_pickaxe` and the column; each leg's unarmed counterfactual is in the same run |
 | `block_entity` | tested | A/B/K: the town hall's block entity holds the colony attachment, which round-trips and survives a relaunch; F/H, L2, M1: each hut's marker is found by `has_building` and lost on the break (L3). All four types are declared in code (`Registrar::block_entity_type`), not in `data/`, which is why the tool sees no id for them |
 | `*` | not ported | everything else the jar carries: the other ~90 blocks and ~234 items, the other ~35 jobs, the research tree (`data:researches`), crafter recipes, colony/visitor/name data, the other ~148 loot tables, the recipes the port does not carry, the item/block/entity tags, and the world-gen families (`worldgen:structure`, `worldgen:structure_set`, `worldgen:template_pool`, `worldgen:processor_list`, `tag:worldgen`). The builder's `blueprints/**` are jar **art** and may not be carried at all (`blocked(jar-assets)`). The gap list below is the prose form of this row. |
 
-The commands (`colony info/rename/radius`, `citizen hire/list`, `job assign/info`) are not a family
-the tool inventories; every one of them is called and its **parsed** reply asserted in the leg
-(A, B, G, H, I, L, M), and an unknown job is refused by name.
+The commands (`colony info/rename/radius`, `citizen hire/list`, `job assign/info`, `requests`) are
+not a family the tool inventories; every one of them is called and its **parsed** reply asserted in
+the leg (A, B, G, H, I, L, M — `/minecolonies requests` in H, L2 and M1), and an unknown job is
+refused by name.
 
 ## Gaps (stated, not hidden)
 
@@ -522,10 +684,12 @@ Content and behaviour, unchanged from 0.1.1:
 
 - The other ~35 jobs (builder, guard, crafter, cook, …), the builder and its schematics
   (`blueprints/**`), the research tree (`data/minecolonies/researches/**`), the colony/citizen UI,
-  happiness, saturation, the request system, raids, permissions and ranks, colony size growth from
-  buildings, worldgen colonies, and the colony registry across unloaded chunks.
-- The citizen's own model and texture (a native renderer slice); the scythe is a plain item with no
-  harvest behaviour of its own (the job does the harvesting).
+  happiness, saturation, **the rest of the request system** (deliveries, crafting, food, pickups and
+  the request GUI — the **tool** family is ported in 0.2.6), raids, permissions and ranks, colony
+  size growth from buildings, worldgen colonies, and the colony registry across unloaded chunks.
+- The citizen's own model and texture (a native renderer slice). The scythe is now the farmer's
+  **trade tool** (0.2.6), but it is still a plain item: it does not harvest on use, and it takes no
+  damage — the job does the harvesting with it in hand.
 - The colony banner, the supply camp/ship, and every other block of the mod. The **buildings the
   three jobs need** are carried (`blockhutfarmer`, `blockhutlumberjack`, `blockhutminer`) and their
   rule is asserted both ways; what is still missing is the **builder and the buildings' level /
@@ -543,6 +707,9 @@ launch) are all transcripts, not compile-level claims. What remains open:
   value names the building, so a hut placed by 0.2.4 or earlier needs re-placing once — a
   deliberate break, because "a hut" could not say *which* building it was.
 - The villager-fallback citizen does not farm (above).
+- **New in 0.2.6:** the request list is saved in the colony record, so a request stays as written
+  until a job tick or `/minecolonies requests` reconciles it; a citizen removed from the world
+  without a roster change keeps its row until the next read. The readout is the repair point.
 - `python3 ports/tools/upstream_ready.py minecolonies --copyleft` reports the pin blocker when the
   tool's hardcoded campaign pin differs from the port's: the SDK nightly is a campaign-level ruling,
   not a port defect.
@@ -572,61 +739,79 @@ a second build is byte-identical (`cmp`), `check` and `fits` exit 0.
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
 
-At **0.2.5 / `0a875da`** (2026-11-21), the logs under `ports/_shared/evidence/minecolonies/` and
+At **0.2.6 / `0a875da`** (2026-11-22), the logs under `ports/_shared/evidence/minecolonies/` and
 `ports/_shared/evidence/minecolonies-e2e/`. `check` and `fits` print the sha256 of the delivered
 package they were run against; `sdk-build*.log` and `sdk-sha256.log` are the package's own.
 
 | step | command | result | log |
 |---|---|---|---|
-| runtime tests (red) | `cargo test --offline`, the new rules as `panic!()` bodies | **54 passed, 4 failed**, `a job's building` / `not implemented: a job's building status` / `not implemented: the hut blocks` | `sdk-test-slice3-red.log` |
-| runtime tests | `cargo test --offline --locked` | **59 passed**, 0 failed, `TEST_EXIT:0` | `sdk-test.log` |
-| lints | `cargo clippy --offline --all-targets -- -D warnings` | exit 0, **0 warnings**, `CLIPPY_EXIT:0` | `sdk-clippy.log` |
+| runtime tests (red) | `cargo test --offline`, the new rules as `panic!()`/`unimplemented!()` bodies | **59 passed, 9 failed** — `a job's tool` / `not implemented: a job's tool` / `not implemented: the citizen's hand` / `not implemented: the colony's requests` / the record's new field / the support round trip | `sdk-test-slice4-red.log` |
+| runtime tests | `cargo test --offline --locked` | **68 passed**, 0 failed | `sdk-test.log` |
+| lints | `cargo clippy --offline --locked --all-targets -- -D warnings` | exit 0, **0 warnings** | `sdk-clippy.log` |
 | format | `cargo fmt --check` | `FMT_EXIT:0` | `sdk-fmt.log` |
-| package, twice | `rm -f Cargo.lock && cargo horizon-mod build` ×2, `cmp` | **`CMP:identical`**, **71,966 B**, sha256 **`9fbb989826e8b472ef026467286fc2af9b84b5b7134424a40e8235ba5043a635`** | `sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.log` |
-| registry check | `cargo horizon-mod check minecolonies.hmod` (the delivered file) | `minecolonies 0.2.5 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`; `71,966 bytes, SHA-256 9fbb9898…3a635`, `CHECK_EXIT:0` — run against sha `9fbb9898…` | `sdk-check.log` |
-| compile the package's source | `cargo horizon-mod check --uses minecolonies.hmod` | `USES_EXIT:0` (compiles for wasm as well; the unused-item notes are the native-only Parts) | `sdk-check-uses.log` |
-| fits the pin | `cargo horizon-mod fits minecolonies.hmod --build 0a875da` | `0a875da  made for`, `FITS_EXIT:0` — run against sha `9fbb9898…` | `sdk-fits.log` |
-| fits another build | `cargo horizon-mod fits minecolonies.hmod --build 0b14f8a` | `0b14f8a  fits`, `FITS_OTHER_EXIT:0` — run against sha `9fbb9898…` | `sdk-fits-other.log` |
+| package, twice | `rm -f Cargo.lock && cargo horizon-mod build` ×2, `cmp` | **`CMP:identical`**, **77,378 B**, sha256 **`bc41900e63fe6e766a6c188a065c865cc8dd49deda8b68ca7e0dcc9dd0f947b6`** | `sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.log` |
+| registry check | `cargo horizon-mod check minecolonies.hmod` (the delivered file) | `minecolonies 0.2.6 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`; `77,378 bytes, SHA-256 bc41900e…f947b6`, exit 0 — run against that sha | `sdk-check.log` |
+| compile the package's source | `cargo horizon-mod check --uses minecolonies.hmod` | exit 0 (compiles for wasm as well; the unused-item notes are the native-only Parts) | `sdk-check-uses.log` |
+| fits the pin | `cargo horizon-mod fits minecolonies.hmod --build 0a875da` | `0a875da  made for`, exit 0 — run against sha `bc41900e…` | `sdk-fits.log` |
+| fits another build | `cargo horizon-mod fits minecolonies.hmod --build 0b14f8a` | `0b14f8a  fits`, exit 0 — run against sha `bc41900e…` | `sdk-fits-other.log` |
 | content | `python3 tools/gen_assets.py --check`, `python3 tools/assemble_content.py --check` | `assets/minecolonies/: 25 files, byte-identical to the palette's output`; `data/` matches the assembler; `GEN_EXIT:0`, `ASSEMBLE_EXIT:0` | `sdk-assets.log` |
-| **no jar-derived asset** | every file under `assets/` hashed against every jar entry | `tree: 25 files … 14006 bytes` / `jar-derived asset bytes: 0 (files matched: 0)` — 22,747 jar entries, 20,465 distinct hashes | `sdk-provenance.log` |
+| **no jar-derived asset** | every file under `assets/` hashed against every jar entry | `tree: 25 files … 14006 bytes` / `jar-derived asset bytes: 0 (files matched: 0)` — 24,101 jar entries, 20,465 distinct hashes, 8,605 under `assets/minecolonies/**` | `sdk-provenance.log` |
 | package contents | `unzip -l minecolonies.hmod` | **53 files**; `LICENSE` (GPL-3.0 text) and `LICENSE-NOTICE.md` inside; **no `Cargo.lock`** | `sdk-entries.txt` |
 | gate | `python3 ports/tools/verify-sdk-package.py minecolonies` | **1/1 package(s) verified** | — |
-| game build | `ports/tools/launcher-game.sh build minecolonies` | `Compiling minecolonies (1 of 1)` (the manifest's version moved to 0.2.5, so the launcher could not reuse the 0.2.4 build) | — |
+| game build | `ports/tools/launcher-game.sh build minecolonies` | `Compiling minecolonies (1 of 1)` (the manifest's version moved to 0.2.6, so the launcher could not reuse the 0.2.5 build) | — |
 | in game | `build-slot.sh run … --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0`, phases A–N | `minecolonies-e2e/e2e-launcher.log` |
 | control (the unmodded Nightly) | `GAME=$CONTROL_GAME … tools/e2e.sh` | **FAIL** at `ctl place of minecolonies:blockhuttownhall … failed` / `Unknown item 'minecolonies:blockhuttownhall'`, `EXIT:1` | `minecolonies-e2e/e2e-launcher-control.log` |
 | control inside the same run | `CONTROL=1 … tools/e2e.sh` | the control leg says *"without the package: no town hall item"*, then the modded leg is **PASS** + `EXIT:0` | `minecolonies-e2e/e2e-launcher-control-inside.log` |
-| fail-capability (depth) | `SELFTEST=1 … tools/e2e.sh` | **FAIL** `the miner did not dig 9 blocks above the bedrock`, `EXIT:1` | `minecolonies-e2e/e2e-selftest.log` |
+| fail-capability (the hand) | `TOOL_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: Ada holds minecolonies:scythe, so the hand was written`, `EXIT:1` | `minecolonies-e2e/e2e-tool-selftest.log` |
+| fail-capability (the hand + depth) | `SELFTEST=1 … tools/e2e.sh` | **FAIL** at the same held read, `EXIT:1` | `minecolonies-e2e/e2e-selftest-tool-and-depth.log` |
+| fail-capability (depth) | `MINER_SELFTEST=1 … tools/e2e.sh` | **FAIL** `the miner did not dig 9 blocks above the bedrock`, `EXIT:1` | `minecolonies-e2e/e2e-selftest.log` |
 | fail-capability (the break) | `HUT_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the broken hut reads missing, so the marker went with the block`, `EXIT:1` | `minecolonies-e2e/e2e-hut-selftest.log` |
-| fail-capability (founding) | `FOUNDING_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the second town hall was refused, as it should be`, `EXIT:1` | `minecolonies-e2e/e2e-founding-selftest.log` |
-| log gate | `python3 ports/tools/check-e2e-logs.py minecolonies-e2e --strict` | `logs=6 ok=6 missing-exit=0 bad-exit=0`, exit 0 | — |
-| coverage | `python3 ports/tools/check-coverage.py minecolonies` | `missing_families=0 … missing=0`, exit 0; the two new blocks are `tested` rows | — |
+| fail-capability (founding) | `FOUNDING_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the second town hall was refused, as it should be`, `EXIT:1` (0.2.5 leg; the founding code is unchanged) | `minecolonies-e2e/e2e-founding-selftest.log` |
+| log gate | `python3 ports/tools/check-e2e-logs.py minecolonies-e2e --strict` | `logs=8 ok=8 missing-exit=0 bad-exit=0`, exit 0 | — |
+| coverage | `python3 ports/tools/check-coverage.py minecolonies` | `families=31 … missing_families=0 … missing=0`, exit 0; `tool_request` and the scythe are `tested` rows | — |
 
-**The in-game run at this pin, 2026-11-21** (`minecolonies-e2e/e2e-launcher.log`, the phases in
-order): A–E founding and both refusals (including 120 across × 200 up, the fixed defect), F/G/H the
-farmer's hut, the hire and the building rule (`no building` while unemployed, then `farmer's hut
-present`), I the farmer harvests and walks, J a citizen with no colony is inert, K the colony
-survives quit + relaunch, L the two trees with the **building rule**: the assignment is refused with
-no lumberjack's hut (and the tree stays whole), the hut is placed → `job info` reads "lumberjack's
-hut present" → the tree falls (a sapling replanted only when the chest held one, the leaves
+**The in-game run at this pin, 2026-11-22** (`minecolonies-e2e/e2e-launcher.log`, the phases in
+order): A–E founding and both refusals (including 120 across × 200 up, the fixed defect); F the
+farmer's hut, two mature crops and an **empty** colony chest; G the hire; H the **tool rule**: the
+unemployed citizen has `no building, no tool`, the assignment is accepted, `job info` reads
+`farmer's hut present, holding nothing`, `/minecolonies requests` reads
+`1 request: Ada needs minecolonies:scythe`, the mature crop beside the unarmed farmer stays at age
+7 over 200 ticks, the scythe taken from the chest clears the request, `job info` reads
+`holding minecolonies:scythe`, and the chest no longer holds it; I the farmer harvests and walks;
+J a citizen with no colony is inert; K the colony survives quit + relaunch **and the farmer still
+holds the scythe**, with no request reopened; L the two trees with the **building and tool rules**:
+the assignment is refused with no lumberjack's hut (the tree stays whole), the hut is placed →
+`job info` reads "lumberjack's hut present, holding nothing" → `/minecolonies requests` reads
+`1 request: Bo needs minecraft:iron_axe` → the tree stays **whole over 200 ticks** → one axe in the
+chest → the request reads `none`, `job info` reads `holding minecraft:iron_axe`, the axe is out of
+the chest, and the tree falls (a sapling replanted only when the chest held one, the leaves
 untouched, 4 then 8 logs in the chest) → the hut is **broken** → `job info` reads "lumberjack's hut
-missing" (L1–L3); M the miner's 1×1 eight-block shaft to the bedrock with the **mine** placed and
-`job info` reading "mine present" (M1), 8 cobblestone in the chest; N the **five** recipes crafted
-in a real table with their controls (the two huts included), the scythe read back and an unknown id
-refused. Every assertion of L and M has its counterfactual in the same run (the citizen unemployed
-beside the same tree/column stays whole), the depth inversion is the `SELFTEST=1` leg and the break
-inversion is the `HUT_SELFTEST=1` leg.
+missing" (L1–L3); M the miner's 1×1 eight-block shaft to the bedrock with the **mine** and the
+**pickaxe**: the unarmed miner leaves the column whole and the request open, the pickaxe taken from
+the chest clears it, and the shaft is 8 deep with 8 cobblestone in the chest (M1); N the **five**
+recipes crafted in a real table with their controls, the scythe read back and an unknown id
+refused. Every assertion of H, L and M has its counterfactual in the same run (the citizen unarmed
+beside the same crop/tree/column leaves it whole); the hand inversion is the `TOOL_SELFTEST=1` leg
+(and `SELFTEST=1`), the depth inversion the `MINER_SELFTEST=1` leg and the break inversion the
+`HUT_SELFTEST=1` leg.
 
 `tools/e2e.sh` launches with **`--offscreen`** rather than `--headless`: phase N opens a crafting
 table's menu and clicks its slots, and a menu needs a screen. Its scratch home goes under
 `${E2E_TMP:-/tmp/opencode}` (the launcher's env block exports `E2E_TMP`, because `/tmp` is a 7.5 GB
-tmpfs).
+tmpfs). The tree/shaft/chest setup writes with `must_setblock`, which asserts every block it wrote
+and retries: a dropped chat `setblock` once left a tree standing on air and failed much later
+(measured in the hut-selftest leg of this run), so the setup verifies its own world.
 
-**Not carried, not claimed:** the builder's schematics and the huts' levels, and everything in the
-gap list above. The e2e's citizen inventory is the colony's chest, stated as a deviation, not as
-upstream's own building rack.
+**Not carried, not claimed:** the builder's schematics and the huts' levels, the rest of the
+request system, and everything in the gap list above. The e2e's citizen inventory is the colony's
+chest, stated as a deviation, not as upstream's own building rack.
 
-History — the 0.2.4 evidence stays in place, superseded by this run:
+History — the 0.2.5 evidence stays in place, superseded by this run:
 
+- **0.2.5 / `0a875da`** (2026-11-21): 59 tests, `71,966 B` sha256 `9fbb9898…3a635`, `check`, `check
+  --uses` and both `fits` exit 0, in-game `PASS` + `EXIT:0` with the control, `HUT_SELFTEST=1` and
+  `FOUNDING_SELFTEST=1` at `EXIT:1`; the two huts, the building rule for every job and the
+  `player_destroyed_block` break.
 - **0.2.4 / `0a875da`** (2026-11-21): 55 tests, `63,940 B` sha256 `d81dcd77…ac0aa`, `check` and
   both `fits` exit 0, in-game `PASS` + `EXIT:0` with the control, `SELFTEST=1` and
   `FOUNDING_SELFTEST=1` at `EXIT:1`; the two new jobs with **no building** (the deviation 0.2.5
@@ -641,6 +826,28 @@ History — the 0.2.4 evidence stays in place, superseded by this run:
   (`e2e-dev.log`, `e2e-embedded.log`, `e2e-nightly.log`, `e2e-selftest.log`).
 
 ## Changelog for the next version (verbatim)
+
+**0.2.6** — the fourth slice, the tool request:
+
+- **A job needs its trade tool, and the colony records the request.** `Tool { job, item }` in the
+  rules: the farmer's is `minecolonies:scythe`, the lumberjack's `minecraft:iron_axe`, the miner's
+  `minecraft:iron_pickaxe`. Without it in the citizen's **main hand** the worker does not walk,
+  harvest, fell or dig; the colony's record gains a **`requests`** list (optional on read, so a
+  0.2.5 colony still loads) and `/minecolonies requests` prints `1 request: Bo needs
+  minecraft:iron_axe` or `requests: none`.
+- **The tool comes from the colony's chest**: one matching item is taken into the citizen's held
+  slot at the level's end, and the request clears — the first behaviour of the carried scythe,
+  which is now the farmer's tool. `job info` reports the hand (`holding minecraft:iron_axe`,
+  `holding nothing`), `colony info` reports the open count and `citizen list` appends
+  `, needs <item>`.
+- **The saved record keeps its counters**: the codec's field list had stopped reading `Felled` and
+  `Dug`, so a colony's log/block totals reset to zero across a relaunch. Fixed, and pinned by an
+  encode → decode round-trip test of the whole record, `Requests` included.
+- The in-game leg gained the tool legs of H, L2 and M1: each worker is left **unarmed** first
+  (the mature crop stays at age 7, the four-log tree and the eight-block column stay whole) with
+  its request open, then takes its tool from the chest, reads `requests: none` and does its work;
+  K proves the held tool survives a relaunch. `TOOL_SELFTEST=1` inverts the "held" read (and
+  `SELFTEST=1` sets it together with the miner's depth inversion), so the assertion can fail.
 
 **0.2.5** — the third slice, the two jobs' buildings:
 

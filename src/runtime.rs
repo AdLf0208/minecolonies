@@ -61,6 +61,17 @@ pub const MINER_HUT: &str = "minecolonies:blockhutminer";
 /// Every hut this port carries: the block-entity registration, the marker's check and the break
 /// handler all read this one list, so a new job's building is added in one place.
 pub const HUTS: [&str; 3] = [FARMER_HUT, LUMBERJACK_HUT, MINER_HUT];
+/// The lumberjack's trade tool: an axe (`com.minecolonies.coremod.tooltype.axe`), at the iron
+/// tier the port's requests name. The lumberjack's hut recipe puts a *wooden* axe in the trade's
+/// tool slot; a tool request names one item, and the port carries one tier.
+pub const LUMBERJACK_TOOL: &str = "minecraft:iron_axe";
+/// The miner's trade tool: a pickaxe (`com.minecolonies.coremod.tooltype.pickaxe`), the same
+/// tier rule as the lumberjack's.
+pub const MINER_TOOL: &str = "minecraft:iron_pickaxe";
+/// The farmer's trade tool: the scythe this port carries. Upstream's request system asks for a
+/// tool class; the port's farmer harvests with its own scythe, which is the item's first
+/// behaviour.
+pub const FARMER_TOOL: &str = "minecolonies:scythe";
 /// The citizen's content entity type.
 pub const CITIZEN: &str = "minecolonies:citizen";
 /// The crop the farmer works (`Blocks.WHEAT`).
@@ -335,6 +346,31 @@ impl Job {
             Self::Miner => Some(MINER_DELAY_TICKS),
         }
     }
+
+    /// The tool the job's rule needs before it runs, or `None` for a citizen that holds no job.
+    ///
+    /// Upstream's request system asks for a tool *class* with a minimum level
+    /// (`com.minecolonies.coremod.request.tool.pretype` / `.preminlevel`,
+    /// `StandardRequests$ToolRequest`); a colony that carries one tier asks for one item, so the
+    /// request names the item the readout prints.
+    #[must_use]
+    pub const fn tool(self) -> Option<Tool> {
+        match self {
+            Self::Unemployed => None,
+            Self::Farmer => Some(Tool {
+                job: Self::Farmer,
+                item: FARMER_TOOL,
+            }),
+            Self::Lumberjack => Some(Tool {
+                job: Self::Lumberjack,
+                item: LUMBERJACK_TOOL,
+            }),
+            Self::Miner => Some(Tool {
+                job: Self::Miner,
+                item: MINER_TOOL,
+            }),
+        }
+    }
 }
 
 impl fmt::Display for Job {
@@ -358,6 +394,81 @@ pub fn building_status(job: Job, present: bool) -> String {
 #[must_use]
 pub fn is_hut(id: &str) -> bool {
     HUTS.contains(&id)
+}
+
+/// A job's tool: the item a worker must hold before the job's rule runs, and the job that asks
+/// for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tool {
+    /// The job whose rule needs the tool.
+    pub job: Job,
+    /// The item the job needs.
+    pub item: &'static str,
+}
+
+/// An open tool request: a citizen whose job needs a tool the colony has not given it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    /// The citizen's roster id (its entity uuid's text form).
+    pub citizen: String,
+    /// The name the readout prints.
+    pub name: String,
+    /// The job that asked, so the saved record says who and why.
+    pub job: Job,
+    /// The item the job needs.
+    pub item: String,
+}
+
+/// Whether `job`'s rule cannot run with `held` in the citizen's hand (`None` for an empty hand).
+/// A citizen without a job asks for nothing, so it is never missing a tool.
+#[must_use]
+pub fn tool_missing(job: Job, held: Option<&str>) -> bool {
+    job.tool().is_some_and(|tool| held != Some(tool.item))
+}
+
+/// How `/minecolonies job info` reports the citizen's hand: "holding minecraft:iron_axe",
+/// "holding nothing", or the honest "holding X, not Y" for something that is not the job's tool.
+/// An unemployed citizen has no trade tool to read.
+#[must_use]
+pub fn hand_status(job: Job, held: Option<&str>) -> String {
+    let Some(tool) = job.tool() else {
+        return "no tool".to_owned();
+    };
+    match held {
+        Some(item) if item == tool.item => format!("holding {item}"),
+        Some(item) => format!("holding {item}, not {}", tool.item),
+        None => "holding nothing".to_owned(),
+    }
+}
+
+/// The colony's open tool requests, as `/minecolonies requests` prints them: "requests: none",
+/// "1 request: Bo needs minecraft:iron_axe", or "2 requests: …; …".
+#[must_use]
+pub fn requests_line(requests: &[Request]) -> String {
+    if requests.is_empty() {
+        return "requests: none".to_owned();
+    }
+    let rows = requests
+        .iter()
+        .map(|request| format!("{} needs {}", request.name, request.item))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if requests.len() == 1 {
+        format!("1 request: {rows}")
+    } else {
+        format!("{} requests: {rows}", requests.len())
+    }
+}
+
+/// The request count as `/minecolonies colony info` prints it: "0 requests open", "1 request
+/// open".
+#[must_use]
+pub fn requests_status(open: usize) -> String {
+    if open == 1 {
+        "1 request open".to_owned()
+    } else {
+        format!("{open} requests open")
+    }
 }
 
 /// One citizen of the roster.
@@ -385,11 +496,13 @@ pub struct Colony {
     pub felled: u64,
     /// Blocks the colony's miners have dug.
     pub dug: u64,
+    /// The citizens' open tool requests: a job whose tool the colony has not given it yet.
+    pub requests: Vec<Request>,
     pub citizens: Vec<Citizen>,
 }
 
 impl Colony {
-    /// The colony the founding produced, with no citizens yet.
+    /// The colony the founding produced, with no citizens yet and nothing requested.
     #[must_use]
     pub fn founded(founding: Founding, now: i64) -> Self {
         Self {
@@ -403,6 +516,7 @@ impl Colony {
             harvested: 0,
             felled: 0,
             dug: 0,
+            requests: Vec::new(),
             citizens: Vec::new(),
         }
     }
@@ -457,6 +571,41 @@ impl Colony {
     /// Adds `count` blocks to the colony's dug total.
     pub fn count_dug(&mut self, count: u64) {
         self.dug += count;
+    }
+
+    /// Records the citizen's open tool request, or refreshes it in place. Answers whether the
+    /// record changed, so a caller that ticks every 40 ticks does not rewrite an unchanged
+    /// record.
+    pub fn request(&mut self, request: Request) -> bool {
+        match self
+            .requests
+            .iter_mut()
+            .find(|open| open.citizen == request.citizen)
+        {
+            Some(open) if *open == request => false,
+            Some(open) => {
+                *open = request;
+                true
+            }
+            None => {
+                self.requests.push(request);
+                true
+            }
+        }
+    }
+
+    /// Drops citizen `citizen`'s request: its tool arrived, or it stopped needing one. Answers
+    /// whether a request was removed.
+    pub fn settle(&mut self, citizen: &str) -> bool {
+        let before = self.requests.len();
+        self.requests.retain(|open| open.citizen != citizen);
+        self.requests.len() != before
+    }
+
+    /// The citizen's open request, if the colony has one for it.
+    #[must_use]
+    pub fn open_request(&self, citizen: &str) -> Option<&Request> {
+        self.requests.iter().find(|open| open.citizen == citizen)
     }
 }
 
@@ -794,6 +943,8 @@ pub enum Value {
     Str(String),
     /// `(id, name, job id)`, as the roster is written out.
     Citizens(Vec<(String, String, String)>),
+    /// The open tool requests, as they are written out.
+    Requests(Vec<Request>),
 }
 
 /// Why a saved record could not be read back.
@@ -858,6 +1009,7 @@ pub fn colony_fields(colony: &Colony) -> Vec<(&'static str, Value)> {
                     .collect(),
             ),
         ),
+        ("Requests", Value::Requests(colony.requests.clone())),
     ]
 }
 /// The record back from its saved fields (the inverse of [`colony_fields`]).
@@ -917,6 +1069,11 @@ pub fn colony_from_fields(fields: &[(&str, Value)]) -> Result<Colony, RecordErro
         harvested: u64::try_from(long("Harvested")?).map_err(|_| RecordError::Kind("Harvested"))?,
         felled: counter("Felled")?,
         dug: counter("Dug")?,
+        requests: match map.get("Requests") {
+            Some(Value::Requests(rows)) => rows.clone(),
+            Some(_) => return Err(RecordError::Kind("Requests")),
+            None => Vec::new(),
+        },
         citizens,
     })
 }
@@ -1148,6 +1305,7 @@ mod tests {
             harvested: 9,
             felled: 3,
             dug: 5,
+            requests: Vec::new(),
             citizens: vec![
                 Citizen {
                     id: "c-1".to_owned(),
@@ -1189,7 +1347,8 @@ mod tests {
                 "Harvested",
                 "Felled",
                 "Dug",
-                "Citizens"
+                "Citizens",
+                "Requests"
             ]
         );
     }
@@ -1766,5 +1925,131 @@ mod tests {
         fields.retain(|(key, _)| *key != "Felled" && *key != "Dug");
         let read = colony_from_fields(&fields).expect("an older record still reads");
         assert_eq!((read.felled, read.dug), (0, 0));
+    }
+
+    // --- slice 4: the tool request -----------------------------------------------------------
+
+    fn bo_request() -> Request {
+        Request {
+            citizen: "c-2".to_owned(),
+            name: "Bo".to_owned(),
+            job: Job::Lumberjack,
+            item: LUMBERJACK_TOOL.to_owned(),
+        }
+    }
+
+    #[test]
+    fn every_working_job_names_the_tool_its_rule_needs() {
+        for (job, item) in [
+            (Job::Farmer, FARMER_TOOL),
+            (Job::Lumberjack, LUMBERJACK_TOOL),
+            (Job::Miner, MINER_TOOL),
+        ] {
+            let tool = job.tool().expect("a working job needs its tool");
+            assert_eq!(tool.job, job, "the tool names the job that asks for it");
+            assert_eq!(tool.item, item);
+            assert!(!tool.item.is_empty());
+        }
+        assert_eq!(Job::Unemployed.tool(), None);
+        assert_eq!(
+            Job::Lumberjack.tool(),
+            Some(Tool {
+                job: Job::Lumberjack,
+                item: "minecraft:iron_axe",
+            }),
+            "the lumberjack's axe is the item the readout names"
+        );
+    }
+
+    #[test]
+    fn a_job_without_its_tool_does_not_work() {
+        assert!(
+            tool_missing(Job::Lumberjack, None),
+            "an empty hand is not an axe"
+        );
+        assert!(tool_missing(Job::Lumberjack, Some("minecraft:stone_axe")));
+        assert!(!tool_missing(Job::Lumberjack, Some(LUMBERJACK_TOOL)));
+        assert!(!tool_missing(Job::Farmer, Some(FARMER_TOOL)));
+        assert!(
+            !tool_missing(Job::Unemployed, None),
+            "a citizen with no job asks for no tool"
+        );
+    }
+
+    #[test]
+    fn job_info_reports_the_hand() {
+        assert_eq!(
+            hand_status(Job::Lumberjack, Some(LUMBERJACK_TOOL)),
+            "holding minecraft:iron_axe"
+        );
+        assert_eq!(hand_status(Job::Lumberjack, None), "holding nothing");
+        assert_eq!(
+            hand_status(Job::Lumberjack, Some("minecraft:stick")),
+            "holding minecraft:stick, not minecraft:iron_axe"
+        );
+        assert_eq!(
+            hand_status(Job::Unemployed, Some("minecraft:stick")),
+            "no tool"
+        );
+    }
+
+    #[test]
+    fn the_request_line_reads_the_way_the_command_says_it() {
+        assert_eq!(requests_line(&[]), "requests: none");
+        assert_eq!(
+            requests_line(&[bo_request()]),
+            "1 request: Bo needs minecraft:iron_axe"
+        );
+        let mut ada = bo_request();
+        ada.citizen = "c-1".to_owned();
+        ada.name = "Ada".to_owned();
+        ada.job = Job::Farmer;
+        ada.item = FARMER_TOOL.to_owned();
+        assert_eq!(
+            requests_line(&[ada, bo_request()]),
+            "2 requests: Ada needs minecolonies:scythe; Bo needs minecraft:iron_axe"
+        );
+    }
+
+    #[test]
+    fn the_colony_counts_its_open_requests() {
+        assert_eq!(requests_status(0), "0 requests open");
+        assert_eq!(requests_status(1), "1 request open");
+        assert_eq!(requests_status(2), "2 requests open");
+    }
+
+    #[test]
+    fn a_request_is_recorded_once_and_settled() {
+        let mut colony = colony();
+        assert!(colony.request(bo_request()));
+        assert!(
+            !colony.request(bo_request()),
+            "the same request twice changes nothing"
+        );
+        assert_eq!(colony.requests.len(), 1);
+        assert_eq!(colony.open_request("c-2"), Some(&bo_request()));
+        let mut renamed = bo_request();
+        renamed.name = "Robert".to_owned();
+        assert!(colony.request(renamed.clone()), "a changed row is written");
+        assert_eq!(colony.open_request("c-2"), Some(&renamed));
+        assert!(colony.settle("c-2"));
+        assert!(colony.open_request("c-2").is_none());
+        assert!(!colony.settle("c-2"), "settling nothing changes nothing");
+    }
+
+    #[test]
+    fn the_record_carries_the_open_requests() {
+        let mut colony = colony();
+        colony.request(bo_request());
+        let fields = colony_fields(&colony);
+        assert_eq!(colony_from_fields(&fields), Ok(colony));
+    }
+
+    #[test]
+    fn a_record_saved_before_requests_existed_reads_none() {
+        let mut fields = colony_fields(&colony());
+        fields.retain(|(key, _)| *key != "Requests");
+        let read = colony_from_fields(&fields).expect("an older record still reads");
+        assert!(read.requests.is_empty());
     }
 }

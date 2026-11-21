@@ -1,9 +1,65 @@
-# VALIDATION — MineColonies slices 1, 2 and 3
+# VALIDATION — MineColonies slices 1, 2, 3 and 4
 
-Validated on Linux with Rust 1.99.1 against **Horizon
+Validated on Linux with Rust 1.97/1.99 against **Horizon
 `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** (Nightly 2026-11-20) and horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, through `ports/tools/build-slot.sh`
-(`BUILD_LOCAL=1`, `CARGO_INCREMENTAL=0`, no bare `cargo`, no `--target-dir`).
+(`CARGO_INCREMENTAL=0`, no bare `cargo`, no `--target-dir`).
+
+## 0.2.6 — slice 4, the tool request (2026-11-22)
+
+| Check | Command | Result |
+|---|---|---|
+| rules first (red) | `cargo test --offline`, the new rules as `panic!()`/`unimplemented!()` bodies | **59 passed, 9 failed** — `a job's tool` / `not implemented: a job's tool` / `not implemented: the citizen's hand` / `not implemented: the colony's requests` / the record field / the support round trip (`sdk-test-slice4-red.log`) |
+| tests | `cargo test --offline --locked` | **68 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --offline --locked --all-targets -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| format | `cargo fmt --check` | exit 0 (`sdk-fmt.log`) |
+| package, twice | `rm -f Cargo.lock && cargo horizon-mod build` ×2, `cmp` | `CMP:identical`, **77,378 B**, sha256 `bc41900e63fe6e766a6c188a065c865cc8dd49deda8b68ca7e0dcc9dd0f947b6` (`sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.log`) |
+| registry check | `cargo horizon-mod check minecolonies.hmod` | `minecolonies 0.2.6 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`; 77,378 B, sha `bc41900e…` (`sdk-check.log`) |
+| source compile | `cargo horizon-mod check --uses minecolonies.hmod` | exit 0 (`sdk-check-uses.log`) |
+| fits the pin | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, sha `bc41900e…` (`sdk-fits.log`) |
+| fits another build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, sha `bc41900e…` (`sdk-fits-other.log`) |
+| content | `python3 tools/gen_assets.py --check` + `tools/assemble_content.py --check` | **25** assets byte-identical, `data/` matches (`sdk-assets.log`) |
+| no jar-derived asset | sha256 of every `assets/` file against every jar entry | tree 25 files / 14,006 B; **jar-derived asset bytes: 0**, files matched 0, over 24,101 jar entries (20,465 distinct hashes) (`sdk-provenance.log`) |
+| package contents | unzip listing | **53 files**, `LICENSE` + `LICENSE-NOTICE.md`, no `Cargo.lock` (`sdk-entries.txt`) |
+| gate | `python3 ports/tools/verify-sdk-package.py minecolonies` | **1/1 package(s) verified** |
+| game build | `ports/tools/launcher-game.sh build minecolonies` | `Compiling minecolonies (1 of 1)` (0.2.6, so no cached-package reuse) |
+| in game | `build-slot.sh run … --step e2e -- bash tools/e2e.sh` | **PASS**, `EXIT:0`, phases A–N (`minecolonies-e2e/e2e-launcher.log`) |
+| control | `GAME=$CONTROL_GAME … tools/e2e.sh` | **FAIL** at `ctl place of minecolonies:blockhuttownhall … failed` / `Unknown item 'minecolonies:blockhuttownhall'`, `EXIT:1` (`e2e-launcher-control.log`) |
+| control inside one run | `CONTROL=1 … tools/e2e.sh` | control leg *"without the package: no town hall item"*, then modded **PASS** `EXIT:0` (`e2e-launcher-control-inside.log`) |
+| fail-capability (the hand) | `TOOL_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: Ada holds minecolonies:scythe, so the hand was written`, `EXIT:1` (`e2e-tool-selftest.log`) |
+| fail-capability (hand + depth) | `SELFTEST=1 … tools/e2e.sh` | **FAIL** at the same held read, `EXIT:1` (`e2e-selftest-tool-and-depth.log`) |
+| fail-capability (depth) | `MINER_SELFTEST=1 … tools/e2e.sh` | **FAIL** `the miner did not dig 9 blocks above the bedrock`, `EXIT:1` (`e2e-selftest.log`) |
+| fail-capability (break) | `HUT_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the broken hut reads missing, so the marker went with the block`, `EXIT:1` (`e2e-hut-selftest.log`) |
+| log gate | `python3 ports/tools/check-e2e-logs.py minecolonies-e2e --strict` | `logs=8 ok=8 missing-exit=0 bad-exit=0`, exit 0 |
+| coverage | `python3 ports/tools/check-coverage.py minecolonies` | `missing_families=0 … missing=0`, exit 0 |
+
+The in-game leg's new assertions, from `e2e-launcher.log`:
+
+```
+== H: the job's tool is a request, then it is taken from the colony's chest ==
+  Ada: job Unemployed, …, no building, no tool.
+  Ada: job Farmer, …, farmer's hut present, holding nothing.
+  1 request: Ada needs minecolonies:scythe
+  the unarmed farmer left the mature crop at age 7 and the request open
+  Ada: job Farmer, …, farmer's hut present, holding minecolonies:scythe.
+  the scythe left the chest for Ada's hand and the request cleared
+== K: the colony survives quit and relaunch ==
+  Ada: job Farmer, …, farmer's hut present, holding minecolonies:scythe.      (after the relaunch)
+== L2: the hut is placed, the tool is requested, then taken, and the tree falls ==
+  Bo: job Lumberjack, …, lumberjack's hut present, holding nothing.
+  1 request: Bo needs minecraft:iron_axe
+  without an axe the tree is whole and Bo's request is open
+  Bo: job Lumberjack, …, lumberjack's hut present, holding minecraft:iron_axe.
+  the axe left the chest for Bo's hand and the request cleared
+  after the fell: soil at 2004,101,-1 is 'minecraft:dirt', stump is 'minecraft:oak_sapling',
+    chest [{"count":4,"item":"minecraft:oak_log"}]
+== M1: the mine is the miner's building, and the pickaxe is its tool ==
+  Cass: job Miner, …, mine present, holding nothing.
+  1 request: Cass needs minecraft:iron_pickaxe
+  without a pickaxe the column is whole and Cass's request is open
+  Cass: job Miner, …, mine present, holding minecraft:iron_pickaxe.
+  the pickaxe left the chest for Cass's hand and the request cleared
+```
 
 ## 0.2.5 — slice 3, the two jobs' buildings (2026-11-21)
 

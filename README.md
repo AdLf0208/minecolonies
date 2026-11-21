@@ -1,8 +1,9 @@
-# MineColonies for Horizon — slices 1, 2 and 3
+# MineColonies for Horizon — slices 1, 2, 3 and 4
 
 A Horizon port of [MineColonies](https://github.com/ldtteam/minecolonies): **a town hall founds a
 colony, its citizens take jobs that tick in the world** — a farmer, a lumberjack and a miner, each
-in **its own building** — and `/minecolonies colony|citizen|job` configures it.
+in **its own building and with its trade tool requested from the colony** — and
+`/minecolonies colony|citizen|job|requests` configures it.
 
 Delivered as **one flat SDK package**: [`minecolonies.hmod`](minecolonies.hmod) — `horizon-mod.toml`
 (api `0.2`, `side = "both"`, `capabilities = ["registries"]`, `[native]` pinned to
@@ -32,17 +33,23 @@ shows the colony.
     down from where it stands, one block per step, never into bedrock, water or lava, never past the
     colony, and every drop goes into the colony's chest.
   A job is **refused** while its building is not standing inside the colony, `/minecolonies job info`
-  reports the building as `present` or `missing`, and **breaking the hut** takes the building with
-  it.
-- **Persistence.** The colony, its roster, its job counters and each citizen's job are saved with
-  the world, and the jobs resume after a relaunch.
+  reports the building as `present` or `missing` **and the tool in the citizen's hand**, and
+  **breaking the hut** takes the building with it.
+- **Tools and requests.** Every working job needs its **trade tool** in its single held slot — the
+  farmer a `minecolonies:scythe`, the lumberjack a `minecraft:iron_axe`, the miner a
+  `minecraft:iron_pickaxe`. Without it the worker **does not work** and the colony records a
+  request; `/minecolonies requests` reads `1 request: Bo needs minecraft:iron_axe` (or
+  `requests: none`). One tool in the colony's chest is taken into the citizen's hand, the request
+  clears, and the job runs.
+- **Persistence.** The colony, its roster, its job counters, its open requests, each citizen's job
+  and the tool in its hand are saved with the world, and the jobs resume after a relaunch.
 
 ## What this port does not do
 
 The other ~35 jobs, the builder and the building schematics, the research tree, the colony and
-citizen UIs, happiness, saturation, requests, raids, permissions, colony growth from buildings and
-world-gen colonies are **not implemented** — see
-[`notes.md`](notes.md#gaps-stated-not-hidden) and its coverage table.
+citizen UIs, happiness, saturation, the rest of the request system (deliveries, crafting, food,
+pickups), raids, permissions, colony growth from buildings and world-gen colonies are **not
+implemented** — see [`notes.md`](notes.md#gaps-stated-not-hidden) and its coverage table.
 The citizen draws with its villager template's model; its own texture is generated but a renderer
 for it is a later slice.
 
@@ -81,7 +88,10 @@ eval "$(../tools/launcher-game.sh env minecolonies)"
 ports/tools/build-slot.sh run --job e2e-minecolonies --port ports/minecolonies --step e2e -- \
     bash ports/minecolonies/tools/e2e.sh                 # phases A-N, PASS + EXIT:0
 GAME=$CONTROL_GAME … tools/e2e.sh                        # the unmodified Nightly: fails on the ids
-SELFTEST=1 … tools/e2e.sh                                # the miner's depth inverted: FAIL
+SELFTEST=1 … tools/e2e.sh                                # the hand and the miner's depth inverted: FAIL
+TOOL_SELFTEST=1 … tools/e2e.sh                           # only the hand inverted: FAIL
+MINER_SELFTEST=1 … tools/e2e.sh                          # only the depth inverted: FAIL
+HUT_SELFTEST=1 … tools/e2e.sh                            # the broken hut inverted: FAIL
 ```
 
 Everything under a build slot (see `../_shared/build-slots-usage.md`), e.g.

@@ -20,17 +20,19 @@ use std::sync::Mutex;
 use mod_api::{
     AttachmentCodec, AttachmentError, AttachmentHolder, AttachmentQueries, AttachmentType,
     BlockKey, BlockUpdateFlags, Command, CommandArgumentValue, CommandSource, Compound, EntityRef,
-    Flow, Holder, Host, HostTransaction, Identifier, ItemResource, ItemStack, LevelRef, MobRef,
-    PlayerRef, RegisterCommandsEvent, RunModCommandEvent, ServerHost, SpawnReason, Tag, Text,
+    Flow, Hand, Holder, Host, HostTransaction, Identifier, ItemResource, ItemStack, LevelRef,
+    MobRef, PlayerRef, RegisterCommandsEvent, RunModCommandEvent, ServerHost, SpawnReason, Tag,
+    Text,
 };
 
 use crate::runtime::{
     AIR, CITIZEN, Citizen, Colony, FARMER_HUT, FARMER_REACH, Job, LUMBERJACK_HUT, LUMBERJACK_REACH,
-    LUMBERJACK_SEARCH, MAX_COLONY_SIZE_CHUNKS, MINER_HUT, Owner, Pos, Step, TOWN_HALL, TownHall,
-    Value, WHEAT, WHEAT_MAX_AGE, WHEAT_REPLANT_AGE, clamp_size, colony_fields, colony_from_fields,
-    colony_tag, default_name, farmer_step, founding_refusal, grows_a_sapling, hire_refusal,
-    horizontal_distance, is_hut, is_log, lumberjack_step, may_manage, miner_next, radius_blocks,
-    read_colony_tag, sapling_for, should_work, tree_at,
+    LUMBERJACK_SEARCH, MAX_COLONY_SIZE_CHUNKS, MINER_HUT, Owner, Pos, Request, Step, TOWN_HALL,
+    TownHall, Value, WHEAT, WHEAT_MAX_AGE, WHEAT_REPLANT_AGE, clamp_size, colony_fields,
+    colony_from_fields, colony_tag, default_name, farmer_step, founding_refusal, grows_a_sapling,
+    hand_status, hire_refusal, horizontal_distance, is_hut, is_log, lumberjack_step, may_manage,
+    miner_next, radius_blocks, read_colony_tag, requests_line, requests_status, sapling_for,
+    should_work, tool_missing, tree_at,
 };
 
 /// The vanilla mob a citizen falls back to when the content type is not loaded.
@@ -102,6 +104,7 @@ fn placeholder_colony() -> Colony {
         harvested: 0,
         felled: 0,
         dug: 0,
+        requests: Vec::new(),
         citizens: Vec::new(),
     }
 }
@@ -122,6 +125,18 @@ fn encode_colony(colony: &Colony) -> Result<Compound, AttachmentError> {
                             ("Id", Tag::String(id.as_str().into())),
                             ("Name", Tag::String(name.as_str().into())),
                             ("Job", Tag::String(job.as_str().into())),
+                        ])
+                    })
+                    .collect(),
+            ),
+            Value::Requests(rows) => Tag::List(
+                rows.into_iter()
+                    .map(|request| {
+                        Tag::compound([
+                            ("Citizen", Tag::String(request.citizen.as_str().into())),
+                            ("Name", Tag::String(request.name.as_str().into())),
+                            ("Job", Tag::String(request.job.id().into())),
+                            ("Item", Tag::String(request.item.as_str().into())),
                         ])
                     })
                     .collect(),
@@ -164,7 +179,10 @@ fn read_fields(map: &Compound) -> Vec<(&'static str, Value)> {
         "Size",
         "Founded",
         "Harvested",
+        "Felled",
+        "Dug",
         "Citizens",
+        "Requests",
     ] {
         let Some(tag) = map.get(&key.into()) else {
             continue;
@@ -181,6 +199,21 @@ fn read_fields(map: &Compound) -> Vec<(&'static str, Value)> {
                             text_of(row, "Name")?,
                             text_of(row, "Job")?,
                         ))
+                    })
+                    .collect(),
+            ),
+            ("Requests", Tag::List(rows)) => Value::Requests(
+                rows.iter()
+                    .filter_map(|row| {
+                        let Tag::Compound(row) = row else {
+                            return None;
+                        };
+                        Some(Request {
+                            citizen: text_of(row, "Citizen")?,
+                            name: text_of(row, "Name")?,
+                            job: Job::from_id(&text_of(row, "Job")?)?,
+                            item: text_of(row, "Item")?,
+                        })
                     })
                     .collect(),
             ),
@@ -536,6 +569,7 @@ pub(crate) fn on_level_tick_post(host: &mut dyn ServerHost, level: LevelRef) {
     for item in due {
         complete(host, level, item);
     }
+    flush_pickups(host, level, dimension.as_deref());
     flush_deliveries(host, level, dimension.as_deref());
 }
 
@@ -780,7 +814,8 @@ pub(crate) fn on_citizen_tick(host: &mut dyn ServerHost, entity: EntityRef) {
     step_job(host, entity, level, hall, &colony);
 }
 
-/// One citizen's job step: the job's own delay, its building when it has one, then the job.
+/// One citizen's job step: the job's own delay, its building when it has one, its trade tool,
+/// then the job.
 fn step_job(
     host: &mut dyn ServerHost,
     entity: EntityRef,
@@ -791,9 +826,12 @@ fn step_job(
     let Some(uuid) = entity.uuid(host) else {
         return;
     };
-    let Some(job) = colony.citizen(&uuid_text(uuid)).map(|citizen| citizen.job) else {
+    let id = uuid_text(uuid);
+    let Some(citizen) = colony.citizen(&id) else {
         return;
     };
+    let job = citizen.job;
+    let name = citizen.name.clone();
     let Some(delay) = job.delay() else {
         return;
     };
@@ -810,6 +848,34 @@ fn step_job(
     if !should_work(now, entity.id(), delay) {
         return;
     }
+    // A job's rule needs its trade tool in the citizen's hand. Without it the worker asks the
+    // colony for one — the request — and does not work; the tool is taken from the colony's
+    // store at the level's end (`Pickup`), and the request is settled when it is in the hand.
+    if let Some(tool) = job.tool() {
+        let held = held_item(&*host, entity);
+        if tool_missing(job, held.as_deref()) {
+            let request = Request {
+                citizen: id,
+                name,
+                job,
+                item: tool.item.to_owned(),
+            };
+            update_colony(host, hall, |colony| colony.request(request));
+            if let Some(at) = entity.position(host) {
+                let chest = colony_chest(host, level, at, colony);
+                ask_for_tool(Pickup {
+                    dimension: host.dimension().to_owned(),
+                    hall,
+                    citizen: uuid,
+                    item: tool.item.to_owned(),
+                    chest,
+                    misses: 0,
+                });
+            }
+            return;
+        }
+        update_colony(host, hall, |colony| colony.settle(&id));
+    }
     match job {
         Job::Farmer => farmer_work(host, entity, level, hall, colony),
         Job::Lumberjack => lumberjack_work(host, entity, level, hall, colony),
@@ -818,10 +884,122 @@ fn step_job(
     }
 }
 
-/// Applies `change` to the colony as it stands *now* at `hall`, then writes it back. A worker's
-/// counter is a delta on the live record, so two citizens that work on the same tick cannot lose
-/// each other's increment (HANDOVER §9d: a write is applied as a delta, not from a stale copy).
-fn bump_colony(host: &mut dyn ServerHost, hall: [i32; 3], change: impl FnOnce(&mut Colony)) {
+/// The item id in an entity's main hand, or `None` for an empty hand (or an unreadable entity).
+fn held_item(host: &dyn Host, entity: EntityRef) -> Option<String> {
+    let living = host.living(entity)?;
+    let stack = living.hand_item(host, Hand::Main)?;
+    Some(stack.item().id(host))
+}
+
+/// The item id in a roster citizen's main hand, resolved through its entity uuid.
+fn citizen_hand(host: &mut dyn ServerHost, citizen: &str) -> Option<String> {
+    let uuid = uuid_value(citizen)?;
+    let entity = host.entity_by_uuid(mod_api::EntityUuid(uuid))?;
+    held_item(host, entity)
+}
+
+// ---------------------------------------------------------------------------
+// Tool pickups: a requested tool is taken from the colony's store at the level's end
+// ---------------------------------------------------------------------------
+
+/// A tool a worker asked its colony for: taken from the colony's store, and put in the citizen's
+/// main hand, at that level's `level_tick_post`. A block-entity write made inside a tick is
+/// overwritten by that entity's own write-back (the same rule the deliveries follow), so the
+/// chest is touched here and not in the job tick.
+struct Pickup {
+    dimension: String,
+    /// The colony's town hall, so the request the pickup settles is written to the right record.
+    hall: [i32; 3],
+    /// The citizen, as its entity uuid.
+    citizen: u128,
+    /// The item the job needs.
+    item: String,
+    /// The colony's store, when one stands inside the colony near the worker.
+    chest: Option<[i32; 3]>,
+    /// Level ticks that did not match this pickup's dimension.
+    misses: u32,
+}
+
+static PICKUPS: Mutex<Vec<Pickup>> = Mutex::new(Vec::new());
+
+fn ask_for_tool(pickup: Pickup) {
+    PICKUPS
+        .lock()
+        .expect("the pickup queue is never poisoned by a panic-free push")
+        .push(pickup);
+}
+
+/// Gives each waiting worker the tool its colony holds, and settles the request it made.
+fn flush_pickups(host: &mut dyn ServerHost, level: LevelRef, dimension: Option<&str>) {
+    let mut queue = PICKUPS
+        .lock()
+        .expect("the pickup queue is never poisoned by a panic-free push");
+    let mut due = Vec::new();
+    let mut waiting = Vec::new();
+    for mut item in std::mem::take(&mut *queue) {
+        if dimension == Some(item.dimension.as_str()) {
+            due.push(item);
+        } else {
+            item.misses += 1;
+            if item.misses < PENDING_MISSES {
+                waiting.push(item);
+            }
+        }
+    }
+    *queue = waiting;
+    drop(queue);
+    for item in due {
+        let Some(entity) = host.entity_by_uuid(mod_api::EntityUuid(item.citizen)) else {
+            continue;
+        };
+        let id = uuid_text(item.citizen);
+        if held_item(&*host, entity).as_deref() == Some(item.item.as_str()) {
+            update_colony(host, item.hall, |colony| colony.settle(&id));
+            continue;
+        }
+        let Some(living) = host.living(entity) else {
+            continue;
+        };
+        let Some(key) = item_key(host, &item.item) else {
+            continue;
+        };
+        if !take_one(host, level, item.chest, &item.item) {
+            // The colony has no such tool (yet): the request stays open.
+            continue;
+        }
+        let stack = ItemStack::of(key);
+        if living
+            .set_hand_item(host, Hand::Main, Some(stack.clone()))
+            .unwrap_or(false)
+        {
+            update_colony(host, item.hall, |colony| colony.settle(&id));
+            continue;
+        }
+        // The hand could not be written: the tool goes back to the store, and to the ground if
+        // the store cannot take it, so a failed write never loses the item.
+        let leftover = insert_drops(host, level, item.chest, std::slice::from_ref(&stack));
+        if let Some(at) = entity.position(host) {
+            let feet = [
+                at[0].floor() as i32,
+                at[1].floor() as i32,
+                at[2].floor() as i32,
+            ];
+            for stack in leftover {
+                let _ = level.pop_resource(host, feet, stack);
+            }
+        }
+    }
+}
+
+/// Applies `change` to the colony as it stands *now* at `hall`, then writes it back when `change`
+/// says it altered the record. A worker's counter is a delta on the live record, so two citizens
+/// that work on the same tick cannot lose each other's increment (HANDOVER §9d: a write is
+/// applied as a delta, not from a stale copy).
+fn update_colony(
+    host: &mut dyn ServerHost,
+    hall: [i32; 3],
+    change: impl FnOnce(&mut Colony) -> bool,
+) {
     let Some(mut colony) = COLONY
         .get_existing(host.attachments(), Holder::BlockEntity(hall))
         .ok()
@@ -829,8 +1007,17 @@ fn bump_colony(host: &mut dyn ServerHost, hall: [i32; 3], change: impl FnOnce(&m
     else {
         return;
     };
-    change(&mut colony);
-    write_colony(host, hall, &colony);
+    if change(&mut colony) {
+        write_colony(host, hall, &colony);
+    }
+}
+
+/// A counter bump: always a change, so the record is always written back.
+fn bump_colony(host: &mut dyn ServerHost, hall: [i32; 3], change: impl FnOnce(&mut Colony)) {
+    update_colony(host, hall, |colony| {
+        change(colony);
+        true
+    });
 }
 
 /// The farmer's work tick: walk to the nearest mature crop, harvest it and leave it replanted.
@@ -1070,6 +1257,9 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
         event.commands.push(Command::new(&format!(
             "{root} colony radius <chunks:integer>"
         )));
+        event
+            .commands
+            .push(Command::new(&format!("{root} requests")));
         for citizen in ["citizen", "citizens"] {
             event
                 .commands
@@ -1088,7 +1278,7 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
 }
 
 fn usage() -> String {
-    "usage: /minecolonies colony info|rename <name>|radius <chunks> · citizen hire [name]|list · job assign <citizen> <job>|info <citizen>"
+    "usage: /minecolonies colony info|rename <name>|radius <chunks> · citizen hire [name]|list · job assign <citizen> <job>|info <citizen> · requests"
         .to_owned()
 }
 
@@ -1127,6 +1317,7 @@ pub(crate) fn on_run_mod_command(
             Some("info") => info_of(host, player, event),
             _ => feedback(host, usage()),
         },
+        Some("requests") => open_requests(host, player),
         _ => feedback(host, usage()),
     }
     Flow::Cancel
@@ -1226,8 +1417,12 @@ fn list(host: &mut dyn ServerHost, player: PlayerRef) {
         colony.citizens.len()
     );
     for (index, citizen) in colony.citizens.iter().enumerate() {
+        let need = colony
+            .open_request(&citizen.id)
+            .map(|request| format!(", needs {}", request.item))
+            .unwrap_or_default();
         line.push_str(&format!(
-            "\n{}. {} — {}",
+            "\n{}. {} — {}{need}",
             index + 1,
             citizen.name,
             citizen.job.label()
@@ -1320,19 +1515,68 @@ fn info_of(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEv
         .job
         .building()
         .is_some_and(|building| has_building(host, &colony, building));
+    let held = citizen_hand(host, &citizen.id);
     feedback(
         host,
         format!(
-            "{}: job {}, colony {} ({} crops harvested), {} logs felled, {} blocks mined, {}.",
+            "{}: job {}, colony {} ({} crops harvested), {} logs felled, {} blocks mined, {}, {}.",
             citizen.name,
             citizen.job.label(),
             colony.name,
             colony.harvested,
             colony.felled,
             colony.dug,
-            crate::runtime::building_status(citizen.job, building)
+            crate::runtime::building_status(citizen.job, building),
+            hand_status(citizen.job, held.as_deref())
         ),
     );
+}
+
+/// `/minecolonies requests`: the colony's open tool requests. The saved list is the record, and
+/// it is brought in line with what the citizens hold right now before it is printed, so a row
+/// whose tool arrived (or whose citizen lost its job or building) cannot survive a read.
+fn open_requests(host: &mut dyn ServerHost, player: PlayerRef) {
+    let Some((hall, mut colony)) = player_colony(host, player) else {
+        no_colony(host);
+        return;
+    };
+    if reconcile_requests(host, &mut colony) {
+        write_colony(host, hall, &colony);
+    }
+    feedback(host, requests_line(&colony.requests));
+}
+
+/// The request rule over the live colony: a citizen whose job has its building but not its tool
+/// has an open request; one holding the tool — or with no working job — has none. Answers
+/// whether the record changed.
+fn reconcile_requests(host: &mut dyn ServerHost, colony: &mut Colony) -> bool {
+    let roster: Vec<(String, String, Job)> = colony
+        .citizens
+        .iter()
+        .map(|citizen| (citizen.id.clone(), citizen.name.clone(), citizen.job))
+        .collect();
+    let mut changed = false;
+    for (id, name, job) in roster {
+        let working = job
+            .building()
+            .is_none_or(|building| has_building(host, colony, building));
+        match job.tool().filter(|_| working) {
+            Some(tool) => {
+                if citizen_hand(host, &id).as_deref() == Some(tool.item) {
+                    changed |= colony.settle(&id);
+                } else {
+                    changed |= colony.request(Request {
+                        citizen: id,
+                        name,
+                        job,
+                        item: tool.item.to_owned(),
+                    });
+                }
+            }
+            None => changed |= colony.settle(&id),
+        }
+    }
+    changed
 }
 
 fn assign(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEvent<'_>) {
@@ -1373,6 +1617,9 @@ fn assign(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEve
     if colony.assign(&who_id, job).is_err() {
         return;
     }
+    // The request belonged to the job that is gone: the new job's tool is asked for on its own
+    // first work tick (or by `/minecolonies requests`), never carried over from the old one.
+    colony.settle(&who_id);
     let citizen = &colony.citizens[index];
     feedback(
         host,
@@ -1414,7 +1661,7 @@ fn citizen_index(colony: &Colony, who: &str) -> Option<usize> {
 
 fn colony_summary(colony: &Colony) -> String {
     let mut line = format!(
-        "Colony {} (id {}, owner {}): centre {}, {} blocks ({} chunks), {} citizens, {} crops harvested, {} logs felled, {} blocks mined, founded at tick {}.",
+        "Colony {} (id {}, owner {}): centre {}, {} blocks ({} chunks), {} citizens, {} crops harvested, {} logs felled, {} blocks mined, {}, founded at tick {}.",
         colony.name,
         colony.id,
         colony.owner_name,
@@ -1425,6 +1672,7 @@ fn colony_summary(colony: &Colony) -> String {
         colony.harvested,
         colony.felled,
         colony.dug,
+        requests_status(colony.requests.len()),
         colony.founded
     );
     if colony.citizens.is_empty() {
@@ -1473,6 +1721,38 @@ mod tests {
         assert_eq!(uuid_value(&uuid_text(uuid)), Some(uuid));
         assert_eq!(uuid_value("not-a-uuid"), None);
         assert_eq!(uuid_value("0123456789abcdef"), None);
+    }
+
+    #[test]
+    fn a_colony_round_trips_through_its_saved_compound() {
+        // The saved form is the only way a colony survives a relaunch: every field the record
+        // carries has to come back, including the counters a later slice added and the requests
+        // this one does. A key the decoder skips is a field that silently resets on load.
+        let colony = Colony {
+            id: 4,
+            name: "Riverside".to_owned(),
+            owner: "00000000-0000-0000-0000-000000000001".to_owned(),
+            owner_name: "Builder".to_owned(),
+            center: Pos::new(200, 101, 0),
+            size_chunks: 4,
+            founded: 1234,
+            harvested: 9,
+            felled: 3,
+            dug: 5,
+            requests: vec![crate::runtime::Request {
+                citizen: "c-2".to_owned(),
+                name: "Bo".to_owned(),
+                job: Job::Lumberjack,
+                item: crate::runtime::LUMBERJACK_TOOL.to_owned(),
+            }],
+            citizens: vec![Citizen {
+                id: "c-2".to_owned(),
+                name: "Bo".to_owned(),
+                job: Job::Lumberjack,
+            }],
+        };
+        let saved = encode_colony(&colony).expect("a colony encodes");
+        assert_eq!(decode_colony(&saved), Ok(colony));
     }
 
     #[test]
