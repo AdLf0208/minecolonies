@@ -27,12 +27,12 @@ use mod_api::{
 
 use crate::runtime::{
     AIR, CITIZEN, Citizen, Colony, FARMER_HUT, FARMER_REACH, Job, LUMBERJACK_HUT, LUMBERJACK_REACH,
-    LUMBERJACK_SEARCH, MAX_COLONY_SIZE_CHUNKS, MINER_HUT, Owner, Pos, Request, Step, TOWN_HALL,
-    TownHall, Value, WHEAT, WHEAT_MAX_AGE, WHEAT_REPLANT_AGE, clamp_size, colony_fields,
+    LUMBERJACK_SEARCH, MAX_COLONY_SIZE_CHUNKS, MINER_HUT, Need, Owner, Pos, Request, Step,
+    TOWN_HALL, TownHall, Value, WHEAT, WHEAT_MAX_AGE, WHEAT_REPLANT_AGE, clamp_size, colony_fields,
     colony_from_fields, colony_tag, default_name, farmer_step, founding_refusal, grows_a_sapling,
-    hand_status, hire_refusal, horizontal_distance, is_hut, is_log, lumberjack_step, may_manage,
-    miner_next, radius_blocks, read_colony_tag, requests_line, requests_status, sapling_for,
-    should_work, tool_missing, tree_at,
+    hand_status, hire_refusal, horizontal_distance, is_hungry, is_hut, is_log, lumberjack_step,
+    may_manage, miner_next, radius_blocks, read_colony_tag, requests_line, requests_status,
+    sapling_for, saturation_status, should_work, tool_missing, tree_at,
 };
 
 /// The vanilla mob a citizen falls back to when the content type is not loaded.
@@ -120,24 +120,30 @@ fn encode_colony(colony: &Colony) -> Result<Compound, AttachmentError> {
             Value::Str(value) => Tag::String(value.as_str().into()),
             Value::Citizens(rows) => Tag::List(
                 rows.into_iter()
-                    .map(|(id, name, job)| {
-                        Tag::compound([
-                            ("Id", Tag::String(id.as_str().into())),
-                            ("Name", Tag::String(name.as_str().into())),
-                            ("Job", Tag::String(job.as_str().into())),
-                        ])
+                    .map(|row| {
+                        let mut saved = Compound::new();
+                        saved.insert("Id".into(), Tag::String(row.id.as_str().into()));
+                        saved.insert("Name".into(), Tag::String(row.name.as_str().into()));
+                        saved.insert("Job".into(), Tag::String(row.job.as_str().into()));
+                        if let Some(saturation) = row.saturation {
+                            saved.insert("Saturation".into(), Tag::Int(i32::from(saturation)));
+                        }
+                        Tag::Compound(saved)
                     })
                     .collect(),
             ),
             Value::Requests(rows) => Tag::List(
                 rows.into_iter()
-                    .map(|request| {
-                        Tag::compound([
-                            ("Citizen", Tag::String(request.citizen.as_str().into())),
-                            ("Name", Tag::String(request.name.as_str().into())),
-                            ("Job", Tag::String(request.job.id().into())),
-                            ("Item", Tag::String(request.item.as_str().into())),
-                        ])
+                    .map(|row| {
+                        let mut saved = Compound::new();
+                        saved.insert("Citizen".into(), Tag::String(row.citizen.as_str().into()));
+                        saved.insert("Name".into(), Tag::String(row.name.as_str().into()));
+                        saved.insert("Job".into(), Tag::String(row.job.as_str().into()));
+                        if let Some(need) = row.need {
+                            saved.insert("Kind".into(), Tag::String(need.id().into()));
+                        }
+                        saved.insert("Item".into(), Tag::String(row.item.as_str().into()));
+                        Tag::Compound(saved)
                     })
                     .collect(),
             ),
@@ -194,11 +200,13 @@ fn read_fields(map: &Compound) -> Vec<(&'static str, Value)> {
                         let Tag::Compound(row) = row else {
                             return None;
                         };
-                        Some((
-                            text_of(row, "Id")?,
-                            text_of(row, "Name")?,
-                            text_of(row, "Job")?,
-                        ))
+                        Some(crate::runtime::CitizenRow {
+                            id: text_of(row, "Id")?,
+                            name: text_of(row, "Name")?,
+                            job: text_of(row, "Job")?,
+                            saturation: int_of(row, "Saturation")
+                                .and_then(|value| u8::try_from(value).ok()),
+                        })
                     })
                     .collect(),
             ),
@@ -208,10 +216,13 @@ fn read_fields(map: &Compound) -> Vec<(&'static str, Value)> {
                         let Tag::Compound(row) = row else {
                             return None;
                         };
-                        Some(Request {
+                        Some(crate::runtime::RequestRow {
                             citizen: text_of(row, "Citizen")?,
                             name: text_of(row, "Name")?,
-                            job: Job::from_id(&text_of(row, "Job")?)?,
+                            job: text_of(row, "Job")?,
+                            need: text_of(row, "Kind")
+                                .as_deref()
+                                .and_then(crate::runtime::Need::from_id),
                             item: text_of(row, "Item")?,
                         })
                     })
@@ -230,6 +241,13 @@ fn read_fields(map: &Compound) -> Vec<(&'static str, Value)> {
 fn text_of(map: &Compound, key: &str) -> Option<String> {
     match map.get(&key.into())? {
         Tag::String(value) => Some(value.to_string_lossy()),
+        _ => None,
+    }
+}
+
+fn int_of(map: &Compound, key: &str) -> Option<i32> {
+    match map.get(&key.into())? {
+        Tag::Int(value) => Some(*value),
         _ => None,
     }
 }
@@ -855,33 +873,89 @@ fn step_job(
         let held = held_item(&*host, entity);
         if tool_missing(job, held.as_deref()) {
             let request = Request {
-                citizen: id,
+                citizen: id.clone(),
                 name,
                 job,
+                need: Need::Tool,
                 item: tool.item.to_owned(),
             };
             update_colony(host, hall, |colony| colony.request(request));
-            if let Some(at) = entity.position(host) {
-                let chest = colony_chest(host, level, at, colony);
-                ask_for_tool(Pickup {
-                    dimension: host.dimension().to_owned(),
-                    hall,
-                    citizen: uuid,
-                    item: tool.item.to_owned(),
-                    chest,
-                    misses: 0,
-                });
-            }
+            ask_for(host, entity, level, hall, colony, Need::Tool, tool.item);
             return;
         }
-        update_colony(host, hall, |colony| colony.settle(&id));
     }
+    // The work tick itself: one point of saturation, spent whether or not there is work to do
+    // (`CitizenData.decreaseSaturationForAction`; this slice spends it on the work tick). At
+    // zero the citizen stops and asks the colony for food (`CitizenAI.shouldEat`,
+    // `StandardRequests$FoodRequest`) instead of walking, harvesting, felling or digging.
+    let Some(saturation) = spend_saturation(host, hall, &id) else {
+        return;
+    };
+    if is_hungry(saturation) {
+        let Some(food) = job.food() else {
+            return;
+        };
+        let request = Request {
+            citizen: id.clone(),
+            name,
+            job,
+            need: Need::Food,
+            item: food.item.to_owned(),
+        };
+        update_colony(host, hall, |colony| colony.request(request));
+        ask_for(host, entity, level, hall, colony, Need::Food, food.item);
+        return;
+    }
+    // The tool is in the hand and the citizen has eaten: a request it owed is settled.
+    update_colony(host, hall, |colony| colony.settle(&id));
     match job {
         Job::Farmer => farmer_work(host, entity, level, hall, colony),
         Job::Lumberjack => lumberjack_work(host, entity, level, hall, colony),
         Job::Miner => miner_work(host, entity, level, hall, colony),
         Job::Unemployed => {}
     }
+}
+
+/// Spends one point of `citizen`'s saturation on the live record and answers the value after the
+/// step (`None` for a citizen the roster does not have). A delta on the live value, so two
+/// citizens working on the same tick cannot lose each other's spend.
+fn spend_saturation(host: &mut dyn ServerHost, hall: [i32; 3], citizen: &str) -> Option<u8> {
+    let mut after = None;
+    update_colony(host, hall, |colony| {
+        let before = colony.citizen(citizen).map(|citizen| citizen.saturation);
+        after = colony.spend_saturation(citizen);
+        after != before
+    });
+    after
+}
+
+/// Asks the colony for `item` on the citizen's behalf: records the request and queues the
+/// level-end pickup that takes it from the colony's chest.
+fn ask_for(
+    host: &mut dyn ServerHost,
+    entity: EntityRef,
+    level: LevelRef,
+    hall: [i32; 3],
+    colony: &Colony,
+    need: Need,
+    item: &str,
+) {
+    let Some(at) = entity.position(host) else {
+        return;
+    };
+    let Some(uuid) = entity.uuid(host) else {
+        return;
+    };
+    let chest = colony_chest(host, level, at, colony);
+    ask_for_need(Pickup {
+        dimension: host.dimension().to_owned(),
+        hall,
+        citizen: uuid,
+        need,
+        item: item.to_owned(),
+        chest,
+        misses: 0,
+    });
 }
 
 /// The item id in an entity's main hand, or `None` for an empty hand (or an unreadable entity).
@@ -898,21 +972,32 @@ fn citizen_hand(host: &mut dyn ServerHost, citizen: &str) -> Option<String> {
     held_item(host, entity)
 }
 
+/// A roster citizen's saved saturation at `hall`, read from the live colony record.
+fn citizen_saturation(host: &mut dyn ServerHost, hall: [i32; 3], citizen: &str) -> Option<u8> {
+    COLONY
+        .get_existing(host.attachments(), Holder::BlockEntity(hall))
+        .ok()
+        .flatten()
+        .and_then(|colony| colony.citizen(citizen).map(|citizen| citizen.saturation))
+}
+
 // ---------------------------------------------------------------------------
 // Tool pickups: a requested tool is taken from the colony's store at the level's end
 // ---------------------------------------------------------------------------
 
-/// A tool a worker asked its colony for: taken from the colony's store, and put in the citizen's
-/// main hand, at that level's `level_tick_post`. A block-entity write made inside a tick is
-/// overwritten by that entity's own write-back (the same rule the deliveries follow), so the
-/// chest is touched here and not in the job tick.
+/// What a worker asked its colony for: a trade tool (put in the citizen's main hand) or a meal
+/// (eaten), taken from the colony's store at that level's `level_tick_post`. A block-entity write
+/// made inside a tick is overwritten by that entity's own write-back (the same rule the
+/// deliveries follow), so the chest is touched here and not in the job tick.
 struct Pickup {
     dimension: String,
     /// The colony's town hall, so the request the pickup settles is written to the right record.
     hall: [i32; 3],
     /// The citizen, as its entity uuid.
     citizen: u128,
-    /// The item the job needs.
+    /// Which family asked: the tool goes to the hand, the food is eaten.
+    need: Need,
+    /// The item the job or the hunger needs.
     item: String,
     /// The colony's store, when one stands inside the colony near the worker.
     chest: Option<[i32; 3]>,
@@ -922,7 +1007,7 @@ struct Pickup {
 
 static PICKUPS: Mutex<Vec<Pickup>> = Mutex::new(Vec::new());
 
-fn ask_for_tool(pickup: Pickup) {
+fn ask_for_need(pickup: Pickup) {
     PICKUPS
         .lock()
         .expect("the pickup queue is never poisoned by a panic-free push")
@@ -953,6 +1038,24 @@ fn flush_pickups(host: &mut dyn ServerHost, level: LevelRef, dimension: Option<&
             continue;
         };
         let id = uuid_text(item.citizen);
+        if item.need == Need::Food {
+            // A meal: taken from the colony's store and eaten, so the citizen is full again and
+            // the request it made is settled. Only a citizen that is still hungry eats one.
+            if !citizen_saturation(host, item.hall, &id).is_some_and(is_hungry) {
+                update_colony(host, item.hall, |colony| colony.settle(&id));
+                continue;
+            }
+            if !take_one(host, level, item.chest, &item.item) {
+                // The colony has no food yet: the request stays open.
+                continue;
+            }
+            update_colony(host, item.hall, |colony| {
+                let fed = colony.feed(&id);
+                let settled = colony.settle(&id);
+                fed || settled
+            });
+            continue;
+        }
         if held_item(&*host, entity).as_deref() == Some(item.item.as_str()) {
             update_colony(host, item.hall, |colony| colony.settle(&id));
             continue;
@@ -1485,6 +1588,7 @@ fn hire(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEvent
         id: uuid_text(uuid),
         name: name.clone(),
         job: Job::Unemployed,
+        saturation: crate::runtime::MAX_SATURATION,
     });
     write_colony(host, hall, &colony);
     feedback(
@@ -1519,13 +1623,14 @@ fn info_of(host: &mut dyn ServerHost, player: PlayerRef, event: &RunModCommandEv
     feedback(
         host,
         format!(
-            "{}: job {}, colony {} ({} crops harvested), {} logs felled, {} blocks mined, {}, {}.",
+            "{}: job {}, colony {} ({} crops harvested), {} logs felled, {} blocks mined, {}, {}, {}.",
             citizen.name,
             citizen.job.label(),
             colony.name,
             colony.harvested,
             colony.felled,
             colony.dug,
+            saturation_status(citizen.saturation),
             crate::runtime::building_status(citizen.job, building),
             hand_status(citizen.job, held.as_deref())
         ),
@@ -1547,33 +1652,54 @@ fn open_requests(host: &mut dyn ServerHost, player: PlayerRef) {
 }
 
 /// The request rule over the live colony: a citizen whose job has its building but not its tool
-/// has an open request; one holding the tool — or with no working job — has none. Answers
-/// whether the record changed.
+/// has an open **tool** request; a citizen that holds its tool but has no saturation has an open
+/// **food** request; one that has both — or no working job — has none. Answers whether the
+/// record changed.
 fn reconcile_requests(host: &mut dyn ServerHost, colony: &mut Colony) -> bool {
-    let roster: Vec<(String, String, Job)> = colony
+    let roster: Vec<(String, String, Job, u8)> = colony
         .citizens
         .iter()
-        .map(|citizen| (citizen.id.clone(), citizen.name.clone(), citizen.job))
+        .map(|citizen| {
+            (
+                citizen.id.clone(),
+                citizen.name.clone(),
+                citizen.job,
+                citizen.saturation,
+            )
+        })
         .collect();
     let mut changed = false;
-    for (id, name, job) in roster {
+    for (id, name, job, saturation) in roster {
         let working = job
             .building()
             .is_none_or(|building| has_building(host, colony, building));
-        match job.tool().filter(|_| working) {
-            Some(tool) => {
-                if citizen_hand(host, &id).as_deref() == Some(tool.item) {
-                    changed |= colony.settle(&id);
-                } else {
+        if !working {
+            changed |= colony.settle(&id);
+            continue;
+        }
+        match job.tool() {
+            Some(tool) if citizen_hand(host, &id).as_deref() != Some(tool.item) => {
+                changed |= colony.request(Request {
+                    citizen: id,
+                    name,
+                    job,
+                    need: Need::Tool,
+                    item: tool.item.to_owned(),
+                });
+            }
+            _ if is_hungry(saturation) => match job.food() {
+                Some(food) => {
                     changed |= colony.request(Request {
                         citizen: id,
                         name,
                         job,
-                        item: tool.item.to_owned(),
+                        need: Need::Food,
+                        item: food.item.to_owned(),
                     });
                 }
-            }
-            None => changed |= colony.settle(&id),
+                None => changed |= colony.settle(&id),
+            },
+            _ => changed |= colony.settle(&id),
         }
     }
     changed
@@ -1726,8 +1852,9 @@ mod tests {
     #[test]
     fn a_colony_round_trips_through_its_saved_compound() {
         // The saved form is the only way a colony survives a relaunch: every field the record
-        // carries has to come back, including the counters a later slice added and the requests
-        // this one does. A key the decoder skips is a field that silently resets on load.
+        // carries has to come back, including the counters a later slice added, the requests
+        // this one does, each citizen's **saturation** and each request's **kind**. A key the
+        // decoder skips is a field that silently resets on load.
         let colony = Colony {
             id: 4,
             name: "Riverside".to_owned(),
@@ -1739,20 +1866,115 @@ mod tests {
             harvested: 9,
             felled: 3,
             dug: 5,
-            requests: vec![crate::runtime::Request {
-                citizen: "c-2".to_owned(),
-                name: "Bo".to_owned(),
-                job: Job::Lumberjack,
-                item: crate::runtime::LUMBERJACK_TOOL.to_owned(),
-            }],
+            requests: vec![
+                crate::runtime::Request {
+                    citizen: "c-2".to_owned(),
+                    name: "Bo".to_owned(),
+                    job: Job::Lumberjack,
+                    need: crate::runtime::Need::Tool,
+                    item: crate::runtime::LUMBERJACK_TOOL.to_owned(),
+                },
+                crate::runtime::Request {
+                    citizen: "c-1".to_owned(),
+                    name: "Ada".to_owned(),
+                    job: Job::Farmer,
+                    need: crate::runtime::Need::Food,
+                    item: crate::runtime::FOOD.to_owned(),
+                },
+            ],
+            citizens: vec![
+                Citizen {
+                    id: "c-2".to_owned(),
+                    name: "Bo".to_owned(),
+                    job: Job::Lumberjack,
+                    saturation: 12,
+                },
+                Citizen {
+                    id: "c-1".to_owned(),
+                    name: "Ada".to_owned(),
+                    job: Job::Farmer,
+                    saturation: 0,
+                },
+            ],
+        };
+        let saved = encode_colony(&colony).expect("a colony encodes");
+        assert_eq!(decode_colony(&saved), Ok(colony));
+    }
+
+    #[test]
+    fn a_saved_roster_row_without_its_saturation_reads_full() {
+        // A 0.2.6 colony's roster rows carry Id/Name/Job only: the decoder must not drop the
+        // citizen, and an absent saturation is a new citizen's (full).
+        let mut row = Compound::new();
+        row.insert("Id".into(), Tag::String("c-2".into()));
+        row.insert("Name".into(), Tag::String("Bo".into()));
+        row.insert("Job".into(), Tag::String("lumberjack".into()));
+        let mut saved = encode_colony(&Colony {
+            id: 4,
+            name: "Riverside".to_owned(),
+            owner: "o".to_owned(),
+            owner_name: "Builder".to_owned(),
+            center: Pos::new(200, 101, 0),
+            size_chunks: 4,
+            founded: 1234,
+            harvested: 0,
+            felled: 0,
+            dug: 0,
+            requests: Vec::new(),
             citizens: vec![Citizen {
                 id: "c-2".to_owned(),
                 name: "Bo".to_owned(),
                 job: Job::Lumberjack,
+                saturation: 5,
             }],
-        };
-        let saved = encode_colony(&colony).expect("a colony encodes");
-        assert_eq!(decode_colony(&saved), Ok(colony));
+        })
+        .expect("a colony encodes");
+        saved.insert("Citizens".into(), Tag::List(vec![Tag::Compound(row)]));
+        let read = decode_colony(&saved).expect("a 0.2.6 roster still reads");
+        assert_eq!(
+            read.citizens,
+            vec![Citizen {
+                id: "c-2".to_owned(),
+                name: "Bo".to_owned(),
+                job: Job::Lumberjack,
+                saturation: crate::runtime::MAX_SATURATION,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_saved_request_row_without_its_kind_reads_a_tool() {
+        // 0.2.6's only request family was the tool: an absent Kind must read as one, not as food
+        // and never as a dropped row.
+        let mut row = Compound::new();
+        row.insert("Citizen".into(), Tag::String("c-2".into()));
+        row.insert("Name".into(), Tag::String("Bo".into()));
+        row.insert("Job".into(), Tag::String("lumberjack".into()));
+        row.insert(
+            "Item".into(),
+            Tag::String(crate::runtime::LUMBERJACK_TOOL.into()),
+        );
+        let mut saved = encode_colony(&Colony {
+            id: 4,
+            name: "Riverside".to_owned(),
+            owner: "o".to_owned(),
+            owner_name: "Builder".to_owned(),
+            center: Pos::new(200, 101, 0),
+            size_chunks: 4,
+            founded: 1234,
+            harvested: 0,
+            felled: 0,
+            dug: 0,
+            requests: Vec::new(),
+            citizens: Vec::new(),
+        })
+        .expect("a colony encodes");
+        saved.insert("Requests".into(), Tag::List(vec![Tag::Compound(row)]));
+        let read = decode_colony(&saved).expect("a 0.2.6 request still reads");
+        assert_eq!(
+            read.open_request("c-2").map(|request| request.need),
+            Some(crate::runtime::Need::Tool)
+        );
     }
 
     #[test]

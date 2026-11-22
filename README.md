@@ -1,8 +1,8 @@
-# MineColonies for Horizon — slices 1, 2, 3 and 4
+# MineColonies for Horizon — slices 1–5
 
 A Horizon port of [MineColonies](https://github.com/ldtteam/minecolonies): **a town hall founds a
 colony, its citizens take jobs that tick in the world** — a farmer, a lumberjack and a miner, each
-in **its own building and with its trade tool requested from the colony** — and
+in **its own building, with its trade tool and its food requested from the colony** — and
 `/minecolonies colony|citizen|job|requests` configures it.
 
 Delivered as **one flat SDK package**: [`minecolonies.hmod`](minecolonies.hmod) — `horizon-mod.toml`
@@ -41,14 +41,20 @@ shows the colony.
   request; `/minecolonies requests` reads `1 request: Bo needs minecraft:iron_axe` (or
   `requests: none`). One tool in the colony's chest is taken into the citizen's hand, the request
   clears, and the job runs.
-- **Persistence.** The colony, its roster, its job counters, its open requests, each citizen's job
-  and the tool in its hand are saved with the world, and the jobs resume after a relaunch.
+- **Food and hunger.** A citizen has a **saturation** (full 60), spends one point per work tick,
+  and at **zero** stops working and asks the colony for food the way it asks for a tool:
+  `/minecolonies requests` reads `1 request: Bo needs minecraft:bread`, and one bread from the
+  colony's chest is eaten, the citizen reads full again, the request clears and the job runs.
+  `job info` prints the saturation (`saturation 46/60`, `saturation 0/60 (hungry)`).
+- **Persistence.** The colony, its roster (each citizen's job and **saturation**), its job counters,
+  its open requests and the tool in a citizen's hand are saved with the world, and the jobs resume
+  after a relaunch.
 
 ## What this port does not do
 
 The other ~35 jobs, the builder and the building schematics, the research tree, the colony and
-citizen UIs, happiness, saturation, the rest of the request system (deliveries, crafting, food,
-pickups), raids, permissions, colony growth from buildings and world-gen colonies are **not
+citizen UIs, happiness, the rest of the request system (deliveries, crafting, pickups, the request
+GUI), raids, permissions, colony growth from buildings and world-gen colonies are **not
 implemented** — see [`notes.md`](notes.md#gaps-stated-not-hidden) and its coverage table.
 The citizen draws with its villager template's model; its own texture is generated but a renderer
 for it is a later slice.
@@ -79,19 +85,21 @@ cargo horizon-mod check target/horizon-mod/minecolonies.hmod
 cargo horizon-mod check --uses target/horizon-mod/minecolonies.hmod   # compiles src/
 cargo horizon-mod fits target/horizon-mod/minecolonies.hmod
 
-# the carried content is regenerated, never edited
+# the carried content is regenerated, never edited; no asset byte comes from the jar
 python3 tools/assemble_content.py --check
 python3 tools/gen_assets.py --check
+python3 tools/check_provenance.py
 
 # the in-game scenario: a launcher-built game at the pin, the prepared 26.3 resources and a ctl
 eval "$(../tools/launcher-game.sh env minecolonies)"
 ports/tools/build-slot.sh run --job e2e-minecolonies --port ports/minecolonies --step e2e -- \
-    bash ports/minecolonies/tools/e2e.sh                 # phases A-N, PASS + EXIT:0
+    bash ports/minecolonies/tools/e2e.sh                 # phases A-O, PASS + EXIT:0
 GAME=$CONTROL_GAME … tools/e2e.sh                        # the unmodified Nightly: fails on the ids
 SELFTEST=1 … tools/e2e.sh                                # the hand and the miner's depth inverted: FAIL
 TOOL_SELFTEST=1 … tools/e2e.sh                           # only the hand inverted: FAIL
 MINER_SELFTEST=1 … tools/e2e.sh                          # only the depth inverted: FAIL
 HUT_SELFTEST=1 … tools/e2e.sh                            # the broken hut inverted: FAIL
+SATIETY_SELFTEST=1 … tools/e2e.sh                        # the "fed" read inverted: FAIL
 ```
 
 Everything under a build slot (see `../_shared/build-slots-usage.md`), e.g.

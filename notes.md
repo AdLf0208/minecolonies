@@ -1,5 +1,5 @@
-# MineColonies — slices 1–4: town hall → colony → citizens → farmer, lumberjack, miner, the two
-# jobs' buildings, and the tool request
+# MineColonies — slices 1–5: town hall → colony → citizens → farmer, lumberjack, miner, the two
+# jobs' buildings, the tool request and the food request
 
 **Class:** `content` · **Tier:** `deep` · **Role:** core · **Priority:** P0 · in ATM10.
 Ported from **MineColonies** `1.1.1411-1.21.1-snapshot`, jar
@@ -8,7 +8,7 @@ Ported from **MineColonies** `1.1.1411-1.21.1-snapshot`, jar
 upstream `ldtteam/minecolonies` branch `version/main`, commit
 `3438c06fc92947b28bbd2fda29f00e207b967a22`.
 
-**Format (2026-11-18):** the flat **SDK package** (mod API `0.2`), version **0.2.6** — one
+**Format (2026-11-18):** the flat **SDK package** (mod API `0.2`), version **0.2.7** — one
 `.hmod` carrying `horizon-mod.toml`, `src/`, `assets/`, `data/` and the licence files. Pin:
 Horizon **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** (Nightly 2026-11-20), horizon-mixins
 **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`**, SDK surface `e0563779…`, package format 6.
@@ -349,6 +349,130 @@ live attachment (not the saved compound), so only the load path was affected. Th
 pins the whole record, `Felled`/`Dug`/`Requests` included; it failed before the `read_fields`
 repair. Not an upstream defect — this port's own decoder — so there is nothing to report upstream.
 
+### Slice 5 — the food request: a hungry citizen is fed from the colony (0.2.6 → 0.2.7)
+
+The gap line this slice closes (`## Gaps`, as it stood before it):
+
+> The other ~35 jobs (builder, guard, crafter, cook, …), … happiness, saturation, **the rest of the
+> request system** (deliveries, crafting, food, pickups and the request GUI — the **tool** family is
+> ported in 0.2.6), raids, permissions and ranks …
+
+The **food** family is the request system's next slice, and the 0.2.6 report's next-slice proposal:
+the citizen gains a saved **saturation**, every work tick spends one point of it, zero stops the
+work and opens a **food request**, and one bread from the colony's chest fills the citizen back up,
+clears the request and lets the job run. It fits `deep` without growing the shape: one more rule
+set in `runtime`, one more saved field in the roster row, one more request kind, one more branch of
+the pickup queue the tool family already uses.
+
+Required behaviour, from upstream's own classes (implemented, not copied):
+
+| Rule | Source |
+|---|---|
+| A citizen has a **saturation** saved with it, full at **60**; a new citizen starts full | `api/colony/ICitizenData.java:30` (`MAX_SATURATION = 60`); `core/colony/CitizenData.java:526`, `:1337`, `:1460` (`TAG_SATURATION`) |
+| Saturation is spent by living and working: an idle drain on a timer plus an extra cost per action | `core/colony/CitizenData.java:1164-1171`; `api/entity/citizen/AbstractEntityCitizen.java:576-584`; `api/util/constant/CitizenConstants.java:61` |
+| A citizen at **saturation 0** is slowed and does not work; the colony must feed it | `core/entity/citizen/EntityCitizen.java:812-825`; `core/entity/ai/workers/CitizenAI.java:286-299` (`shouldEat`) |
+| Food is a **`FoodRequest`** in the colony's request system, not a silent stall | `core/colony/requestsystem/requests/StandardRequests$FoodRequest.class`; `com.minecolonies.coremod.request.food` = *Menu* |
+| A meal restores saturation towards full | `core/entity/ai/minimal/EntityAIEatTask.java:227,378`; `api/colony/requestsystem/requestable/Food.java` (a count and a minimum nutrition) |
+| The job's own saturation factor scales its cost (the farmer's is 1.2) | `core/colony/jobs/JobFarmer.java:42-45`; `api/colony/jobs/IJob.java:320-326` |
+
+**TDD, in the order the ruling asks for.** The rules live in `runtime.rs` (pure), so the failing
+tests came first — the new rules as `panic!()`/`unimplemented!()` bodies and the two saved-field
+plumbing left unread:
+
+```
+$ cargo test --offline
+thread 'runtime::tests::every_working_job_names_the_food_its_citizen_needs' panicked at src/runtime.rs:395:9:
+a job's food
+thread 'runtime::tests::a_work_tick_spends_one_point_of_the_citizens_saturation' panicked at src/runtime.rs:695:9:
+not implemented: a work tick's saturation
+thread 'runtime::tests::a_hungry_citizen_asks_the_colony_for_food' panicked at src/runtime.rs:695:9:
+thread 'runtime::tests::zero_saturation_is_hunger' panicked at src/runtime.rs:497:5:
+not implemented: a hungry citizen
+thread 'runtime::tests::job_info_reads_the_saturation_the_way_the_command_says_it' panicked at src/runtime.rs:504:5:
+not implemented: the citizen's saturation
+thread 'runtime::tests::the_record_carries_the_request_kind' panicked at src/runtime.rs:2357:9:
+assertion `left == right` failed: left: None, right: Some(Tool)
+thread 'support::tests::a_colony_round_trips_through_its_saved_compound' panicked at src/support.rs:1780:9:
+left: … saturation: 60 }, … need: Tool … (the saved rows read their defaults)
+test result: FAILED. 71 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+(`ports/_shared/evidence/minecolonies/sdk-test-slice5-red.log`; the nine are the food sibling, the
+spend, hunger, the request, the meal, the saturation readout, the record's saturation, the record's
+request kind and the support round trip.) Then the rules, the glue and the in-game assertions;
+`sdk-test.log` is the green run of the same suite: **80 tests**.
+
+**What changed in the rules** (`src/runtime.rs`):
+
+- `MAX_SATURATION = 60`, `SATURATION_STEP = 1`, `FOOD = "minecraft:bread"`, `Food { item }`;
+- `Job::food()` — the sibling of `Job::tool()`: every working job eats the colony's one meal, the
+  unemployed citizen eats nothing;
+- `is_hungry(saturation)` (zero), `Colony::{spend_saturation, feed}`, `saturation_status`;
+- `Need { Tool, Food }` on every `Request`, so one list carries both families and the readout can
+  still print `1 request: Bo needs minecraft:bread`;
+- the roster row's **`Saturation`**, optional on read (a 0.2.6 roster reads full), and the request
+  row's **`Kind`**, optional on read (a 0.2.6 request reads as the tool family it was);
+- `Value::{Citizens, Requests}` became rows (`CitizenRow`, `RequestRow`) with `Option` saved fields,
+  so the optional-on-read rule is a unit-tested part of the mapping, not a decoder detail.
+
+**What changed in the glue** (`src/support.rs`):
+
+- `step_job` spends one point of saturation on the citizen's own work tick, after its building and
+  its tool, and returns before the job when the value is zero, recording the **food** request and
+  queueing the meal;
+- the pickup queue took a `need`, so one queue serves both families: a tool goes to the main hand,
+  a **meal is eaten** — `Colony::feed` sets the citizen back to full and the request settles in the
+  same write;
+- `job info` prints the saturation (`saturation 46/60`, `saturation 0/60 (hungry)`), and
+  `/minecolonies requests`'s reconciliation opens the food request for a hungry citizen that holds
+  its tool;
+- `encode_colony`/`read_fields` write and read the two optional fields; both decoder tests fail if
+  the list stops naming them (the 0.2.6 `Felled`/`Dug` defect is why they exist).
+
+**The harness's assertions** (`tools/e2e.sh` O, at `0a875da`):
+
+```
+== O: a hungry worker asks the colony for food, and one bread feeds it ==
+  Bo: job Lumberjack, …, saturation 46/60, lumberjack's hut present, holding minecraft:iron_axe.
+  Bo starts at saturation 46/60
+  saturation 46 -> 41 over 200 ticks, the whole tree still stands
+  Bo: … saturation 0/60 (hungry), lumberjack's hut present, holding minecraft:iron_axe.
+  1 request: Bo needs minecraft:bread
+  at zero saturation the tree is whole and the colony owes Bo a bread
+  Bo: … saturation 59/60, lumberjack's hut present, holding minecraft:iron_axe.
+  the bread left the chest, Bo reads fed and the request cleared
+  the fed lumberjack felled the tree at 2022,-8
+```
+
+Four assertions, each able to fail: the read falls over 200 ticks (a port that never spends
+saturation reads the same value); the four-log tree is **whole** while it falls, because the tree
+stands 18 blocks from Bo (outside the lumberjack's 16-block search) and only moves into reach after
+the meal; at zero the readout is `saturation 0/60 (hungry)` and the colony's **one** request is
+`Bo needs minecraft:bread`; the bread leaves the chest, the citizen reads fed and the tree falls.
+`SATIETY_SELFTEST=1` inverts the "fed" read (the citizen must still read hungry after eating), so a
+port whose meal was never applied passes the inverted leg and fails the normal one
+(`../_shared/evidence/minecolonies-e2e/e2e-satiety-selftest.log`).
+
+**Where it was read (analysis, not code).** The clone `ldtteam/minecolonies` at commit
+`3438c06fc92947b28bbd2fda29f00e207b967a22` (the commit already named at the top of this file;
+`git log -1` confirms it), areas `api/colony/ICitizenData.java`, `api/colony/jobs/IJob.java`,
+`core/colony/CitizenData.java`, `core/colony/jobs/JobFarmer.java`,
+`api/entity/citizen/AbstractEntityCitizen.java`, `core/entity/citizen/EntityCitizen.java`,
+`core/entity/ai/workers/{CitizenAI,AbstractEntityAIBasic}.java`,
+`core/entity/ai/minimal/EntityAIEatTask.java`,
+`core/colony/requestsystem/requests/{StandardRequests,StandardRequestFactories}.java`,
+`api/colony/requestsystem/requestable/Food.java` and
+`api/util/constant/CitizenConstants.java`; the jar's `assets/minecolonies/lang/en_us.json` for the
+request keys (`com.minecolonies.coremod.request.food`). The clone was deleted after this file was
+written. The rewrite differs where `notes.md`'s deviations say so (integer steps, one meal, the
+chest as the store, one request row per citizen).
+
+**The e2e's arrangement, stated:** a citizen that holds its job drains every work tick, so by the
+long felling and mining phases the *idle* farmer had also run out and the colony owed it a bread —
+correct behaviour, but it makes a one-request readout ambiguous. The leg therefore **parks** the
+farmer's job after K (its phases are over) and the miner's after M1, so each request readout names
+one worker. That is a scenario arrangement, not a port rule; every request is a real one.
+
 ### Behaviour, and where it was read
 
 | Rule | Source |
@@ -368,6 +492,9 @@ repair. Not an upstream defect — this port's own decoder — so there is nothi
 | A citizen's tools are its **equipment**; the hand is the slot a job reads, and it saves with the entity | `LivingEntity.getItemBySlot(MAINHAND)`; the pin's `LivingRef::hand_item`/`set_hand_item` |
 | A worker does not do its job without its trade tool (the building and the tool are both prerequisites) | `AbstractJob`/`AbstractBuilding` plus the `ToolRequest`; the port's rule |
 | The colony's request list is what a readout shows, and a request that can be met is not left open | the port's `StandardRequests$ToolRequest` reading, narrowed to the tool family |
+| A citizen's saturation is full at **60**, saves with the citizen, and a new citizen starts full | `ICitizenData.java:30`; `CitizenData.java:526,1337,1460` |
+| Saturation is spent by work; at **0** the citizen stops and the colony owes it **food** | `CitizenData.java:1164-1171`; `CitizenAI.shouldEat`; `StandardRequests$FoodRequest` |
+| A meal restores saturation; one food request is a count of food and a minimum nutrition | `EntityAIEatTask.java:227,378`; `Food.java` |
 
 ## Generated art (the palette and the templates)
 
@@ -428,6 +555,10 @@ renderer: the citizen draws with its villager template's model (a gap, below).
   methods on the host traits are the hidden backend). The read happens in the job tick; the
   **write and the chest extraction** are a `Pickup` queue applied at `level_tick_post`, because a
   block-entity write inside a tick is overwritten by that entity's own write-back.
+- **The food request**: the same `Pickup` queue as a tool, with a `need`: a meal is taken from the
+  colony's chest at `level_tick_post` and **eaten** (`Colony::feed` fills the citizen and settles the
+  request in one write), where a tool goes into the main hand. The saturation itself lives in the
+  roster row and saves with the colony's codec, so it survives a relaunch like the counters do.
 - **Commands**: `Hooks::register_commands` pushes `Command::new("<usage>")` usages;
   `Hooks::run_mod_command` receives the **parsed** invocation (literals + typed arguments) instead
   of a raw line. `/minecolonies requests` reads the record's open requests after reconciling them
@@ -613,6 +744,20 @@ cargo output.
   in the same tick: the extraction writes the colony's chest, and a block-entity write inside a
   tick is overwritten by that entity's own write-back (the delivery rule from 0.2.2). The hand write
   could happen at once, but the chest cannot.
+- **New in 0.2.7 (slice 5):** the saturation rule is **one point per work tick** (`SATURATION_STEP
+  = 1`) on the citizen's own 40-tick cadence, spent only where its job can run (its building stands
+  and its tool is in hand). Upstream spends 0.3 per 1200 idle ticks plus an action cost, and scales
+  it by job and housing level (`computeSaturationConsumptionFactor`, `JobFarmer.getSaturationFactor`
+  = 1.2); this slice states the simpler rule instead of carrying the timer and the factors. A
+  consequence a user notices: an employed but idle citizen becomes hungry within ~2,400 ticks.
+- **New in 0.2.7 (slice 5):** a colony's request list is **one row per citizen**, so a citizen that
+  is both hungry and missing its tool asks for the **tool** first (it cannot work without either
+  way); the food request appears once the tool is in its hand. Upstream keeps a separate request
+  per need.
+- **New in 0.2.7 (slice 5):** one `minecraft:bread` is a **full meal** — the food request's item is
+  one concrete food (as the tool request names one concrete tool), and eating fills the citizen to
+  `MAX_SATURATION` (upstream fills by the food's nutrition from a colony menu). The chest is the
+  store, as it already is for tools and deliveries.
 
 ## Upstream defects fixed
 
@@ -670,6 +815,8 @@ The table is the record the parity rule asks for: a family is `tested` in game t
 | `minecolonies:entities/citizen` | tested | G/M: hired, counted live, and the roster is read back; the citizen entity type is what the hire spawns |
 | `minecolonies:scythe` | tested | N: crafted in a real table, read back from the inventory; H: it is the **farmer's trade tool** — no scythe in the hand leaves the mature crop at age 7 and `/minecolonies requests` reads `1 request: Ada needs minecolonies:scythe`; the scythe in the chest is taken into the hand, the request clears, and the harvest runs; K: the hand survives the relaunch |
 | `tool_request` | tested | H: `1 request: Ada needs minecolonies:scythe` → `requests: none`; L2: `1 request: Bo needs minecraft:iron_axe` → the axe in the hand → `requests: none`, and the tree is whole until it arrives; M1: the same for `minecraft:iron_pickaxe` and the column; each leg's unarmed counterfactual is in the same run |
+| `food_request` | tested | O: `job info` reads `saturation 46/60` → `41/60` over 200 ticks with the whole tree standing; at `0/60 (hungry)` the colony's one request is `Bo needs minecraft:bread`; one bread in the chest leaves it, the citizen reads `59/60` (a work tick after the meal), the request clears and the tree falls; `SATIETY_SELFTEST=1` inverts the fed read |
+| `citizen saturation` | tested | O: the read falls one point per work tick, stops the job at zero and is restored by the meal; K: the roster (saturation included) survives quit and relaunch; `support::tests::a_colony_round_trips_through_its_saved_compound` pins the encoded field and `a_saved_roster_row_without_its_saturation_reads_full` pins the 0.2.6 read |
 | `block_entity` | tested | A/B/K: the town hall's block entity holds the colony attachment, which round-trips and survives a relaunch; F/H, L2, M1: each hut's marker is found by `has_building` and lost on the break (L3). All four types are declared in code (`Registrar::block_entity_type`), not in `data/`, which is why the tool sees no id for them |
 | `*` | not ported | everything else the jar carries: the other ~90 blocks and ~234 items, the other ~35 jobs, the research tree (`data:researches`), crafter recipes, colony/visitor/name data, the other ~148 loot tables, the recipes the port does not carry, the item/block/entity tags, and the world-gen families (`worldgen:structure`, `worldgen:structure_set`, `worldgen:template_pool`, `worldgen:processor_list`, `tag:worldgen`). The builder's `blueprints/**` are jar **art** and may not be carried at all (`blocked(jar-assets)`). The gap list below is the prose form of this row. |
 
@@ -684,9 +831,11 @@ Content and behaviour, unchanged from 0.1.1:
 
 - The other ~35 jobs (builder, guard, crafter, cook, …), the builder and its schematics
   (`blueprints/**`), the research tree (`data/minecolonies/researches/**`), the colony/citizen UI,
-  happiness, saturation, **the rest of the request system** (deliveries, crafting, food, pickups and
-  the request GUI — the **tool** family is ported in 0.2.6), raids, permissions and ranks, colony
-  size growth from buildings, worldgen colonies, and the colony registry across unloaded chunks.
+  happiness, **the rest of the request system** (deliveries, crafting, pickups and the request GUI —
+  the **tool** family is ported in 0.2.6 and the **food** family in 0.2.7), raids, permissions and
+  ranks, colony size growth from buildings, worldgen colonies, and the colony registry across
+  unloaded chunks. Saturation is carried as one integer per work tick, not upstream's timer plus
+  job/housing factors, and the colony has no dining hall or restaurant: the chest feeds the worker.
 - The citizen's own model and texture (a native renderer slice). The scythe is now the farmer's
   **trade tool** (0.2.6), but it is still a plain item: it does not harvest on use, and it takes no
   damage — the job does the harvesting with it in hand.
@@ -710,6 +859,9 @@ launch) are all transcripts, not compile-level claims. What remains open:
 - **New in 0.2.6:** the request list is saved in the colony record, so a request stays as written
   until a job tick or `/minecolonies requests` reconciles it; a citizen removed from the world
   without a roster change keeps its row until the next read. The readout is the repair point.
+- **New in 0.2.7:** a citizen's saturation is saved in its roster row and spent on its work ticks.
+  An unemployed citizen spends nothing (it has no work tick), where upstream's idle timer would
+  still drain it; the two facts are stated in the deviation list above.
 - `python3 ports/tools/upstream_ready.py minecolonies --copyleft` reports the pin blocker when the
   tool's hardcoded campaign pin differs from the port's: the SDK nightly is a campaign-level ruling,
   not a port defect.
@@ -739,36 +891,37 @@ a second build is byte-identical (`cmp`), `check` and `fits` exit 0.
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
 
-At **0.2.6 / `0a875da`** (2026-11-22), the logs under `ports/_shared/evidence/minecolonies/` and
+At **0.2.7 / `0a875da`** (2026-11-22), the logs under `ports/_shared/evidence/minecolonies/` and
 `ports/_shared/evidence/minecolonies-e2e/`. `check` and `fits` print the sha256 of the delivered
 package they were run against; `sdk-build*.log` and `sdk-sha256.log` are the package's own.
 
 | step | command | result | log |
 |---|---|---|---|
-| runtime tests (red) | `cargo test --offline`, the new rules as `panic!()`/`unimplemented!()` bodies | **59 passed, 9 failed** — `a job's tool` / `not implemented: a job's tool` / `not implemented: the citizen's hand` / `not implemented: the colony's requests` / the record's new field / the support round trip | `sdk-test-slice4-red.log` |
-| runtime tests | `cargo test --offline --locked` | **68 passed**, 0 failed | `sdk-test.log` |
+| runtime tests (red) | `cargo test --offline`, the new rules as `panic!()`/`unimplemented!()` bodies | **71 passed, 9 failed** — `a job's food` / `not implemented: a work tick's saturation` / `not implemented: a hungry citizen` / `not implemented: the citizen's saturation` / the request kind / the record's saturation / the support round trip | `sdk-test-slice5-red.log` |
+| runtime tests | `cargo test --offline --locked` | **80 passed**, 0 failed | `sdk-test.log` |
 | lints | `cargo clippy --offline --locked --all-targets -- -D warnings` | exit 0, **0 warnings** | `sdk-clippy.log` |
 | format | `cargo fmt --check` | `FMT_EXIT:0` | `sdk-fmt.log` |
-| package, twice | `rm -f Cargo.lock && cargo horizon-mod build` ×2, `cmp` | **`CMP:identical`**, **77,378 B**, sha256 **`bc41900e63fe6e766a6c188a065c865cc8dd49deda8b68ca7e0dcc9dd0f947b6`** | `sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.log` |
-| registry check | `cargo horizon-mod check minecolonies.hmod` (the delivered file) | `minecolonies 0.2.6 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`; `77,378 bytes, SHA-256 bc41900e…f947b6`, exit 0 — run against that sha | `sdk-check.log` |
+| package, twice | `rm -f Cargo.lock && cargo horizon-mod build` ×2, `cmp` | **`CMP:identical`**, **81,477 B**, sha256 **`63825cc5327a584ca837f0f2d0ee428cfc737d11122a993645a2e869aea0ac92`** | `sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.log`, `sdk-cmp.log` |
+| registry check | `cargo horizon-mod check minecolonies.hmod` (the delivered file) | `minecolonies 0.2.7 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`; `81,477 bytes, SHA-256 63825cc5…ea0ac92`, exit 0 — run against that sha | `sdk-check.log` |
 | compile the package's source | `cargo horizon-mod check --uses minecolonies.hmod` | exit 0 (compiles for wasm as well; the unused-item notes are the native-only Parts) | `sdk-check-uses.log` |
-| fits the pin | `cargo horizon-mod fits minecolonies.hmod --build 0a875da` | `0a875da  made for`, exit 0 — run against sha `bc41900e…` | `sdk-fits.log` |
-| fits another build | `cargo horizon-mod fits minecolonies.hmod --build 0b14f8a` | `0b14f8a  fits`, exit 0 — run against sha `bc41900e…` | `sdk-fits-other.log` |
+| fits the pin | `cargo horizon-mod fits minecolonies.hmod --build 0a875da` | `0a875da  made for`, exit 0 — run against sha `63825cc5…` | `sdk-fits.log` |
+| fits another build | `cargo horizon-mod fits minecolonies.hmod --build 0b14f8a` | `0b14f8a  fits`, exit 0 — run against sha `63825cc5…` | `sdk-fits-other.log` |
 | content | `python3 tools/gen_assets.py --check`, `python3 tools/assemble_content.py --check` | `assets/minecolonies/: 25 files, byte-identical to the palette's output`; `data/` matches the assembler; `GEN_EXIT:0`, `ASSEMBLE_EXIT:0` | `sdk-assets.log` |
-| **no jar-derived asset** | every file under `assets/` hashed against every jar entry | `tree: 25 files … 14006 bytes` / `jar-derived asset bytes: 0 (files matched: 0)` — 24,101 jar entries, 20,465 distinct hashes, 8,605 under `assets/minecolonies/**` | `sdk-provenance.log` |
-| package contents | `unzip -l minecolonies.hmod` | **53 files**; `LICENSE` (GPL-3.0 text) and `LICENSE-NOTICE.md` inside; **no `Cargo.lock`** | `sdk-entries.txt` |
+| **no jar-derived asset** | `python3 tools/check_provenance.py` (every file under `assets/` hashed against every jar entry) | `tree: 25 files … 14006 bytes` / `jar-derived asset bytes: 0 (files matched: 0)` — 22,747 jar files, 20,465 distinct hashes, 8,470 under `assets/minecolonies/**` | `sdk-provenance.log` |
+| package contents | `unzip -l minecolonies.hmod` | **53 files** (54 entries with the header); `LICENSE` (GPL-3.0 text) and `LICENSE-NOTICE.md` inside; **no `Cargo.lock`** | `sdk-entries.txt` |
 | gate | `python3 ports/tools/verify-sdk-package.py minecolonies` | **1/1 package(s) verified** | — |
-| game build | `ports/tools/launcher-game.sh build minecolonies` | `Compiling minecolonies (1 of 1)` (the manifest's version moved to 0.2.6, so the launcher could not reuse the 0.2.5 build) | — |
-| in game | `build-slot.sh run … --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0`, phases A–N | `minecolonies-e2e/e2e-launcher.log` |
+| game build | `ports/tools/launcher-game.sh build minecolonies` | `Compiling minecolonies (1 of 1)` (the manifest's version moved to 0.2.7, so the launcher could not reuse the 0.2.6 build) | — |
+| in game | `build-slot.sh run … --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0`, phases A–O | `minecolonies-e2e/e2e-launcher.log` |
 | control (the unmodded Nightly) | `GAME=$CONTROL_GAME … tools/e2e.sh` | **FAIL** at `ctl place of minecolonies:blockhuttownhall … failed` / `Unknown item 'minecolonies:blockhuttownhall'`, `EXIT:1` | `minecolonies-e2e/e2e-launcher-control.log` |
-| control inside the same run | `CONTROL=1 … tools/e2e.sh` | the control leg says *"without the package: no town hall item"*, then the modded leg is **PASS** + `EXIT:0` | `minecolonies-e2e/e2e-launcher-control-inside.log` |
+| control inside the same run | `CONTROL=1 … tools/e2e.sh` | the control leg says *"without the package: no town hall item"*, then the modded leg is **PASS** + `EXIT:0` (0.2.6 leg; the control path is unchanged) | `minecolonies-e2e/e2e-launcher-control-inside.log` |
+| fail-capability (the meal) | `SATIETY_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: Bo reads full saturation, so the meal was applied`, `EXIT:1` | `minecolonies-e2e/e2e-satiety-selftest.log` |
 | fail-capability (the hand) | `TOOL_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: Ada holds minecolonies:scythe, so the hand was written`, `EXIT:1` | `minecolonies-e2e/e2e-tool-selftest.log` |
-| fail-capability (the hand + depth) | `SELFTEST=1 … tools/e2e.sh` | **FAIL** at the same held read, `EXIT:1` | `minecolonies-e2e/e2e-selftest-tool-and-depth.log` |
-| fail-capability (depth) | `MINER_SELFTEST=1 … tools/e2e.sh` | **FAIL** `the miner did not dig 9 blocks above the bedrock`, `EXIT:1` | `minecolonies-e2e/e2e-selftest.log` |
+| fail-capability (the hand + depth) | `SELFTEST=1 … tools/e2e.sh` | **FAIL** at the same held read, `EXIT:1` | `minecolonies-e2e/e2e-selftest.log` |
+| fail-capability (depth) | `MINER_SELFTEST=1 … tools/e2e.sh` | **FAIL** `the miner did not dig 9 blocks above the bedrock`, `EXIT:1` (0.2.6 leg; the miner's code path is unchanged) | `minecolonies-e2e/e2e-selftest-tool-and-depth.log` |
 | fail-capability (the break) | `HUT_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the broken hut reads missing, so the marker went with the block`, `EXIT:1` | `minecolonies-e2e/e2e-hut-selftest.log` |
-| fail-capability (founding) | `FOUNDING_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the second town hall was refused, as it should be`, `EXIT:1` (0.2.5 leg; the founding code is unchanged) | `minecolonies-e2e/e2e-founding-selftest.log` |
-| log gate | `python3 ports/tools/check-e2e-logs.py minecolonies-e2e --strict` | `logs=8 ok=8 missing-exit=0 bad-exit=0`, exit 0 | — |
-| coverage | `python3 ports/tools/check-coverage.py minecolonies` | `families=31 … missing_families=0 … missing=0`, exit 0; `tool_request` and the scythe are `tested` rows | — |
+| fail-capability (founding) | `FOUNDING_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the second town hall was refused, as it should be`, `EXIT:1` | `minecolonies-e2e/e2e-founding-selftest.log` |
+| log gate | `python3 ports/tools/check-e2e-logs.py minecolonies-e2e --strict` | `logs=9 ok=9 missing-exit=0 bad-exit=0`, exit 0 | — |
+| coverage | `python3 ports/tools/check-coverage.py minecolonies` | `families=32 … missing_families=0 … missing=0`, exit 0; `tool_request`, `food_request` and the scythe are `tested` rows | — |
 
 **The in-game run at this pin, 2026-11-22** (`minecolonies-e2e/e2e-launcher.log`, the phases in
 order): A–E founding and both refusals (including 120 across × 200 up, the fixed defect); F the
@@ -788,26 +941,40 @@ the chest, and the tree falls (a sapling replanted only when the chest held one,
 untouched, 4 then 8 logs in the chest) → the hut is **broken** → `job info` reads "lumberjack's hut
 missing" (L1–L3); M the miner's 1×1 eight-block shaft to the bedrock with the **mine** and the
 **pickaxe**: the unarmed miner leaves the column whole and the request open, the pickaxe taken from
-the chest clears it, and the shaft is 8 deep with 8 cobblestone in the chest (M1); N the **five**
-recipes crafted in a real table with their controls, the scythe read back and an unknown id
-refused. Every assertion of H, L and M has its counterfactual in the same run (the citizen unarmed
-beside the same crop/tree/column leaves it whole); the hand inversion is the `TOOL_SELFTEST=1` leg
-(and `SELFTEST=1`), the depth inversion the `MINER_SELFTEST=1` leg and the break inversion the
-`HUT_SELFTEST=1` leg.
+the chest clears it, and the shaft is 8 deep with 8 cobblestone in the chest (M1); O the **food
+rule**: the hut is placed again, the chest is emptied and a whole four-log tree stands 18 blocks
+from Bo (outside its search) → `job info` reads `saturation 46/60` → `41/60` over 200 ticks with
+the tree whole → at `0/60 (hungry)` `/minecolonies requests` reads
+`1 request: Bo needs minecraft:bread` and the tree is still whole → one bread in the chest leaves
+it, `job info` reads `59/60` (one work tick after the meal) and the request clears → the fed Bo is
+moved beside the tree and fells it; N the **five** recipes crafted in a real table with their
+controls, the scythe read back and an unknown id refused. Every assertion of H, L, M and O has its
+counterfactual in the same run (the citizen unarmed or hungry beside the same crop/tree/column
+leaves it whole); the hand inversion is the `TOOL_SELFTEST=1` leg (and `SELFTEST=1`), the meal
+inversion the `SATIETY_SELFTEST=1` leg, the depth inversion the `MINER_SELFTEST=1` leg and the break
+inversion the `HUT_SELFTEST=1` leg.
 
 `tools/e2e.sh` launches with **`--offscreen`** rather than `--headless`: phase N opens a crafting
 table's menu and clicks its slots, and a menu needs a screen. Its scratch home goes under
 `${E2E_TMP:-/tmp/opencode}` (the launcher's env block exports `E2E_TMP`, because `/tmp` is a 7.5 GB
 tmpfs). The tree/shaft/chest setup writes with `must_setblock`, which asserts every block it wrote
 and retries: a dropped chat `setblock` once left a tree standing on air and failed much later
-(measured in the hut-selftest leg of this run), so the setup verifies its own world.
+(measured in the hut-selftest leg of an earlier run), so the setup verifies its own world. Phase O's
+tree stands outside the lumberjack's search so it cannot fall while the saturation is being read;
+after the meal the citizen is teleported beside it (`tp @e[…,name=Bo]`), which is what makes the
+last assertion about the *job* and not about walking.
 
 **Not carried, not claimed:** the builder's schematics and the huts' levels, the rest of the
-request system, and everything in the gap list above. The e2e's citizen inventory is the colony's
-chest, stated as a deviation, not as upstream's own building rack.
+request system (deliveries, crafting, pickups, the GUI), and everything in the gap list above. The
+e2e's citizen inventory is the colony's chest, stated as a deviation, not as upstream's own building
+rack, and a meal is one bread from that chest.
 
-History — the 0.2.5 evidence stays in place, superseded by this run:
+History — the 0.2.6 and 0.2.5 evidence stays in place, superseded by this run:
 
+- **0.2.6 / `0a875da`** (2026-11-22): 68 tests, `77,378 B` sha256 `bc41900e…f947b6`, `check`,
+  `check --uses` and both `fits` exit 0, in-game `PASS` + `EXIT:0` (A–N) with the control at
+  `EXIT:1`, `TOOL_SELFTEST=1`/`SELFTEST=1`/`MINER_SELFTEST=1`/`HUT_SELFTEST=1`/`FOUNDING_SELFTEST=1`
+  at `EXIT:1`; the tool request and the `read_fields` repair.
 - **0.2.5 / `0a875da`** (2026-11-21): 59 tests, `71,966 B` sha256 `9fbb9898…3a635`, `check`, `check
   --uses` and both `fits` exit 0, in-game `PASS` + `EXIT:0` with the control, `HUT_SELFTEST=1` and
   `FOUNDING_SELFTEST=1` at `EXIT:1`; the two huts, the building rule for every job and the
@@ -826,6 +993,24 @@ History — the 0.2.5 evidence stays in place, superseded by this run:
   (`e2e-dev.log`, `e2e-embedded.log`, `e2e-nightly.log`, `e2e-selftest.log`).
 
 ## Changelog for the next version (verbatim)
+
+**0.2.7** — the fifth slice, the food request:
+
+- **A citizen has a saturation, and it falls one point per work tick.** `Citizen` gains a saved
+  **`saturation`** (full **60**, a new citizen starts full; a 0.2.6 roster loads full) and
+  `job info` prints it: `saturation 46/60`, `saturation 0/60 (hungry)`. A work tick spends one
+  point whether or not there is work to do.
+- **At zero the worker stops and the colony records a food request.** The second family of the
+  request system: `/minecolonies requests` prints `1 request: Bo needs minecraft:bread` while the
+  worker holds its tool and has nothing to eat; the request row gains a **`Kind`** (`tool`/`food`,
+  optional on read so a 0.2.6 request still loads as a tool request).
+- **One bread from the colony's chest feeds the citizen**: it is eaten at the level's end, the
+  citizen reads full again, the request clears and the job runs — `Job::food()` is the sibling of
+  `Job::tool()`, and the pickup queue that brings a tool now also brings a meal.
+- The in-game leg gained **O**: a lumberjack below a whole tree that stands outside its search is
+  read at `46/60` → `41/60`, the tree stays whole, at `0/60 (hungry)` the colony owes a bread, one
+  bread in the chest leaves it, the citizen reads fed, the request clears and the fed lumberjack
+  fells the tree. `SATIETY_SELFTEST=1` inverts the "fed" read, so the assertion can fail.
 
 **0.2.6** — the fourth slice, the tool request:
 

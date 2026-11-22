@@ -72,6 +72,20 @@ pub const MINER_TOOL: &str = "minecraft:iron_pickaxe";
 /// tool class; the port's farmer harvests with its own scythe, which is the item's first
 /// behaviour.
 pub const FARMER_TOOL: &str = "minecolonies:scythe";
+/// A citizen's full saturation: 60 (`ICitizenData.MAX_SATURATION`). A new citizen starts full
+/// (`CitizenData.java:526`) and the value saves with the citizen (`TAG_SATURATION`, `:1337`,
+/// `:1460`).
+pub const MAX_SATURATION: u8 = 60;
+/// Saturation one work tick spends. Upstream spends 0.3 per 1200 idle ticks plus a per-action
+/// cost (`CitizenConstants.SATURATION_DECREASE_AFTER = 1200`,
+/// `AbstractEntityCitizen.decreaseSaturationForAction`); this slice spends one whole point on the
+/// citizen's own work tick and states that as its rule (`notes.md`).
+pub const SATURATION_STEP: u8 = 1;
+/// The food a hungry citizen asks its colony for. Upstream's request names a food class with a
+/// minimum nutrition (`api/colony/requestsystem/requestable/Food.java`,
+/// `StandardRequests$FoodRequest`); a colony that carries one depth names one item, as the tool
+/// request does.
+pub const FOOD: &str = "minecraft:bread";
 /// The citizen's content entity type.
 pub const CITIZEN: &str = "minecolonies:citizen";
 /// The crop the farmer works (`Blocks.WHEAT`).
@@ -371,6 +385,18 @@ impl Job {
             }),
         }
     }
+
+    /// The food a working citizen eats: the sibling of [`Job::tool`], and the second family of
+    /// upstream's request system. A hungry citizen stops working and the colony must feed it
+    /// (`CitizenAI.shouldEat`, `StandardRequests$FoodRequest`); every working job eats the same
+    /// meal, so the request answers one [`Food`].
+    #[must_use]
+    pub const fn food(self) -> Option<Food> {
+        match self {
+            Self::Unemployed => None,
+            Self::Farmer | Self::Lumberjack | Self::Miner => Some(Food { item: FOOD }),
+        }
+    }
 }
 
 impl fmt::Display for Job {
@@ -406,7 +432,46 @@ pub struct Tool {
     pub item: &'static str,
 }
 
-/// An open tool request: a citizen whose job needs a tool the colony has not given it.
+/// The food a working citizen eats: the sibling of [`Tool`], the second family of the colony's
+/// request system. At zero saturation the worker stops and the colony records the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Food {
+    /// The item the citizen needs when its saturation runs out.
+    pub item: &'static str,
+}
+
+/// What a citizen asked its colony for: the two request families this port carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Need {
+    /// The job's trade tool ([`Tool`]).
+    Tool,
+    /// Food, when the citizen's saturation reaches zero ([`Food`]).
+    Food,
+}
+
+impl Need {
+    /// The saved spelling of the kind, the request row's `Kind` field.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Tool => "tool",
+            Self::Food => "food",
+        }
+    }
+
+    /// The kind back from its saved spelling.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "tool" => Some(Self::Tool),
+            "food" => Some(Self::Food),
+            _ => None,
+        }
+    }
+}
+
+/// An open request: a citizen whose job needs a tool the colony has not given it, or whose
+/// saturation has run out and needs food.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     /// The citizen's roster id (its entity uuid's text form).
@@ -415,7 +480,9 @@ pub struct Request {
     pub name: String,
     /// The job that asked, so the saved record says who and why.
     pub job: Job,
-    /// The item the job needs.
+    /// Which family asked: a trade tool or food.
+    pub need: Need,
+    /// The item the job or the hunger needs.
     pub item: String,
 }
 
@@ -424,6 +491,24 @@ pub struct Request {
 #[must_use]
 pub fn tool_missing(job: Job, held: Option<&str>) -> bool {
     job.tool().is_some_and(|tool| held != Some(tool.item))
+}
+
+/// Whether the citizen is too hungry to work: saturation zero (`CitizenAI.shouldEat` /
+/// `EntityCitizen.updateHealing` slow a citizen at `<= 0`). A starving citizen asks for food.
+#[must_use]
+pub fn is_hungry(saturation: u8) -> bool {
+    saturation == 0
+}
+
+/// How `/minecolonies job info` reports the citizen's saturation: "saturation 60/60",
+/// "saturation 0/60 (hungry)", "saturation 37/60".
+#[must_use]
+pub fn saturation_status(saturation: u8) -> String {
+    if is_hungry(saturation) {
+        format!("saturation {saturation}/{MAX_SATURATION} (hungry)")
+    } else {
+        format!("saturation {saturation}/{MAX_SATURATION}")
+    }
 }
 
 /// How `/minecolonies job info` reports the citizen's hand: "holding minecraft:iron_axe",
@@ -477,6 +562,9 @@ pub struct Citizen {
     pub id: String,
     pub name: String,
     pub job: Job,
+    /// The citizen's saturation, 0 to [`MAX_SATURATION`]; a new citizen starts full. A roster
+    /// saved before this field existed reads as full (the saved row's optional `Saturation`).
+    pub saturation: u8,
 }
 
 /// The colony record, as the town hall block entity saves it.
@@ -606,6 +694,26 @@ impl Colony {
     #[must_use]
     pub fn open_request(&self, citizen: &str) -> Option<&Request> {
         self.requests.iter().find(|open| open.citizen == citizen)
+    }
+
+    /// One work tick of citizen `id`: spends [`SATURATION_STEP`] of its saturation. Answers the
+    /// value after the step, or `None` when the roster has no such citizen.
+    pub fn spend_saturation(&mut self, id: &str) -> Option<u8> {
+        let citizen = self.citizens.iter_mut().find(|citizen| citizen.id == id)?;
+        citizen.saturation = citizen.saturation.saturating_sub(SATURATION_STEP);
+        Some(citizen.saturation)
+    }
+
+    /// A meal: the citizen is full again. Answers whether the record changed (an already-full
+    /// citizen, or an absent one, changes nothing).
+    pub fn feed(&mut self, id: &str) -> bool {
+        match self.citizens.iter_mut().find(|citizen| citizen.id == id) {
+            Some(citizen) if citizen.saturation < MAX_SATURATION => {
+                citizen.saturation = MAX_SATURATION;
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -941,10 +1049,32 @@ pub enum Value {
     Int(i32),
     Long(i64),
     Str(String),
-    /// `(id, name, job id)`, as the roster is written out.
-    Citizens(Vec<(String, String, String)>),
-    /// The open tool requests, as they are written out.
-    Requests(Vec<Request>),
+    /// The roster, as it is written out: one row per citizen.
+    Citizens(Vec<CitizenRow>),
+    /// The open requests, as they are written out.
+    Requests(Vec<RequestRow>),
+}
+
+/// One roster row as it saves: the saved job spelling and the saved saturation, not a parsed
+/// citizen. `saturation` is `None` for a row written before the field existed, which reads as
+/// full (upstream's value for a new citizen).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CitizenRow {
+    pub id: String,
+    pub name: String,
+    pub job: String,
+    pub saturation: Option<u8>,
+}
+
+/// One request row as it saves. `need` is `None` for a row written before the kind existed: a
+/// 0.2.6 record's request was a tool request, so an absent kind reads as [`Need::Tool`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestRow {
+    pub citizen: String,
+    pub name: String,
+    pub job: String,
+    pub need: Option<Need>,
+    pub item: String,
 }
 
 /// Why a saved record could not be read back.
@@ -999,17 +1129,31 @@ pub fn colony_fields(colony: &Colony) -> Vec<(&'static str, Value)> {
                 colony
                     .citizens
                     .iter()
-                    .map(|citizen| {
-                        (
-                            citizen.id.clone(),
-                            citizen.name.clone(),
-                            citizen.job.id().to_owned(),
-                        )
+                    .map(|citizen| CitizenRow {
+                        id: citizen.id.clone(),
+                        name: citizen.name.clone(),
+                        job: citizen.job.id().to_owned(),
+                        saturation: Some(citizen.saturation),
                     })
                     .collect(),
             ),
         ),
-        ("Requests", Value::Requests(colony.requests.clone())),
+        (
+            "Requests",
+            Value::Requests(
+                colony
+                    .requests
+                    .iter()
+                    .map(|request| RequestRow {
+                        citizen: request.citizen.clone(),
+                        name: request.name.clone(),
+                        job: request.job.id().to_owned(),
+                        need: Some(request.need),
+                        item: request.item.clone(),
+                    })
+                    .collect(),
+            ),
+        ),
     ]
 }
 /// The record back from its saved fields (the inverse of [`colony_fields`]).
@@ -1046,17 +1190,39 @@ pub fn colony_from_fields(fields: &[(&str, Value)]) -> Result<Colony, RecordErro
     let mut citizens = Vec::new();
     match map.get("Citizens") {
         Some(Value::Citizens(rows)) => {
-            for (id, name, job) in rows {
-                let job = Job::from_id(job).ok_or_else(|| RecordError::Job(job.clone()))?;
+            for row in rows {
+                let job =
+                    Job::from_id(&row.job).ok_or_else(|| RecordError::Job(row.job.clone()))?;
                 citizens.push(Citizen {
-                    id: id.clone(),
-                    name: name.clone(),
+                    id: row.id.clone(),
+                    name: row.name.clone(),
                     job,
+                    // A row saved before saturation existed reads as a new citizen's: full.
+                    saturation: row.saturation.unwrap_or(MAX_SATURATION),
                 });
             }
         }
         Some(_) => return Err(RecordError::Kind("Citizens")),
         None => return Err(RecordError::Missing("Citizens")),
+    }
+    let mut requests = Vec::new();
+    match map.get("Requests") {
+        Some(Value::Requests(rows)) => {
+            for row in rows {
+                let job =
+                    Job::from_id(&row.job).ok_or_else(|| RecordError::Job(row.job.clone()))?;
+                requests.push(Request {
+                    citizen: row.citizen.clone(),
+                    name: row.name.clone(),
+                    job,
+                    // A row saved before the kind existed was a tool request.
+                    need: row.need.unwrap_or(Need::Tool),
+                    item: row.item.clone(),
+                });
+            }
+        }
+        Some(_) => return Err(RecordError::Kind("Requests")),
+        None => {}
     }
     Ok(Colony {
         id: u32::try_from(int("Id")?).map_err(|_| RecordError::Kind("Id"))?,
@@ -1069,11 +1235,7 @@ pub fn colony_from_fields(fields: &[(&str, Value)]) -> Result<Colony, RecordErro
         harvested: u64::try_from(long("Harvested")?).map_err(|_| RecordError::Kind("Harvested"))?,
         felled: counter("Felled")?,
         dug: counter("Dug")?,
-        requests: match map.get("Requests") {
-            Some(Value::Requests(rows)) => rows.clone(),
-            Some(_) => return Err(RecordError::Kind("Requests")),
-            None => Vec::new(),
-        },
+        requests,
         citizens,
     })
 }
@@ -1311,11 +1473,13 @@ mod tests {
                     id: "c-1".to_owned(),
                     name: "Ada".to_owned(),
                     job: Job::Farmer,
+                    saturation: MAX_SATURATION,
                 },
                 Citizen {
                     id: "c-2".to_owned(),
                     name: "Bo".to_owned(),
                     job: Job::Unemployed,
+                    saturation: MAX_SATURATION,
                 },
             ],
         }
@@ -1379,11 +1543,12 @@ mod tests {
         let mut fields = colony_fields(&colony());
         for (key, value) in &mut fields {
             if *key == "Citizens" {
-                *value = Value::Citizens(vec![(
-                    "c-1".to_owned(),
-                    "Ada".to_owned(),
-                    "guard".to_owned(),
-                )]);
+                *value = Value::Citizens(vec![CitizenRow {
+                    id: "c-1".to_owned(),
+                    name: "Ada".to_owned(),
+                    job: "guard".to_owned(),
+                    saturation: Some(MAX_SATURATION),
+                }]);
             }
         }
         assert_eq!(
@@ -1402,7 +1567,12 @@ mod tests {
         };
         assert_eq!(
             citizens[0],
-            ("c-1".to_owned(), "Ada".to_owned(), "farmer".to_owned())
+            CitizenRow {
+                id: "c-1".to_owned(),
+                name: "Ada".to_owned(),
+                job: "farmer".to_owned(),
+                saturation: Some(MAX_SATURATION),
+            }
         );
     }
 
@@ -1432,6 +1602,7 @@ mod tests {
             id: "c-1".to_owned(),
             name: "Ada".to_owned(),
             job: Job::Unemployed,
+            saturation: MAX_SATURATION,
         });
         assert_eq!(colony.citizen("c-1").map(|c| c.job), Some(Job::Unemployed));
         assert_eq!(colony.assign("c-1", Job::Farmer), Ok(()));
@@ -1453,6 +1624,7 @@ mod tests {
                 id: format!("c-{index}"),
                 name: format!("Citizen {index}"),
                 job: Job::Unemployed,
+                saturation: MAX_SATURATION,
             });
         }
         assert_eq!(hire_refusal(&colony), None, "one slot short of the cap");
@@ -1460,6 +1632,7 @@ mod tests {
             id: "c-last".to_owned(),
             name: "Last".to_owned(),
             job: Job::Unemployed,
+            saturation: MAX_SATURATION,
         });
         assert!(
             hire_refusal(&colony).is_some(),
@@ -1934,6 +2107,7 @@ mod tests {
             citizen: "c-2".to_owned(),
             name: "Bo".to_owned(),
             job: Job::Lumberjack,
+            need: Need::Tool,
             item: LUMBERJACK_TOOL.to_owned(),
         }
     }
@@ -2051,5 +2225,183 @@ mod tests {
         fields.retain(|(key, _)| *key != "Requests");
         let read = colony_from_fields(&fields).expect("an older record still reads");
         assert!(read.requests.is_empty());
+    }
+
+    // --- slice 5: the food request -----------------------------------------------------------
+
+    fn food_request() -> Request {
+        Request {
+            citizen: "c-2".to_owned(),
+            name: "Bo".to_owned(),
+            job: Job::Lumberjack,
+            need: Need::Food,
+            item: FOOD.to_owned(),
+        }
+    }
+
+    #[test]
+    fn every_working_job_names_the_food_its_citizen_needs() {
+        for job in [Job::Farmer, Job::Lumberjack, Job::Miner] {
+            let food = job.food().expect("a working citizen eats");
+            assert_eq!(food.item, FOOD, "{} eats the colony's meal", job.label());
+        }
+        assert_eq!(Job::Unemployed.food(), None);
+        assert_eq!(
+            Job::Lumberjack.food(),
+            Some(Food {
+                item: "minecraft:bread",
+            }),
+            "the food is the item the readout prints"
+        );
+    }
+
+    #[test]
+    fn a_work_tick_spends_one_point_of_the_citizens_saturation() {
+        let mut colony = colony();
+        assert_eq!(
+            colony.citizen("c-2").map(|citizen| citizen.saturation),
+            Some(MAX_SATURATION),
+            "a citizen starts full"
+        );
+        assert_eq!(colony.spend_saturation("c-2"), Some(MAX_SATURATION - 1));
+        assert_eq!(
+            colony.citizen("c-2").map(|citizen| citizen.saturation),
+            Some(MAX_SATURATION - 1)
+        );
+        assert_eq!(
+            colony.spend_saturation("c-9"),
+            None,
+            "an absent citizen spends nothing"
+        );
+        for _ in 0..MAX_SATURATION {
+            colony.spend_saturation("c-2");
+        }
+        assert_eq!(
+            colony.citizen("c-2").map(|citizen| citizen.saturation),
+            Some(0),
+            "saturation never goes under zero"
+        );
+    }
+
+    #[test]
+    fn zero_saturation_is_hunger() {
+        assert!(is_hungry(0));
+        assert!(!is_hungry(1));
+        assert!(!is_hungry(MAX_SATURATION));
+    }
+
+    #[test]
+    fn a_hungry_citizen_asks_the_colony_for_food() {
+        let mut colony = colony();
+        for _ in 0..MAX_SATURATION {
+            colony.spend_saturation("c-2");
+        }
+        let request = food_request();
+        assert_eq!(request.need, Need::Food);
+        assert_eq!(request.item, FOOD);
+        assert!(colony.request(request));
+        assert_eq!(
+            requests_line(&colony.requests),
+            "1 request: Bo needs minecraft:bread"
+        );
+    }
+
+    #[test]
+    fn a_meal_fills_the_citizen_and_leaves_the_request_to_settle() {
+        let mut colony = colony();
+        for _ in 0..MAX_SATURATION {
+            colony.spend_saturation("c-2");
+        }
+        assert!(colony.feed("c-2"), "a hungry citizen eats the meal");
+        assert_eq!(
+            colony.citizen("c-2").map(|citizen| citizen.saturation),
+            Some(MAX_SATURATION)
+        );
+        assert!(
+            !colony.feed("c-2"),
+            "an already-full citizen changes nothing"
+        );
+        assert!(!colony.feed("c-9"), "an absent citizen cannot be fed");
+    }
+
+    #[test]
+    fn job_info_reads_the_saturation_the_way_the_command_says_it() {
+        assert_eq!(saturation_status(MAX_SATURATION), "saturation 60/60");
+        assert_eq!(saturation_status(0), "saturation 0/60 (hungry)");
+        assert_eq!(saturation_status(37), "saturation 37/60");
+    }
+
+    #[test]
+    fn the_record_carries_the_citizens_saturation() {
+        let mut colony = colony();
+        colony.spend_saturation("c-1");
+        colony.spend_saturation("c-1");
+        let fields = colony_fields(&colony);
+        assert_eq!(colony_from_fields(&fields), Ok(colony));
+    }
+
+    #[test]
+    fn a_roster_row_saved_before_saturation_existed_reads_full() {
+        let mut fields = colony_fields(&colony());
+        for (key, value) in &mut fields {
+            if *key == "Citizens"
+                && let Value::Citizens(rows) = value
+            {
+                for row in rows {
+                    row.saturation = None;
+                }
+            }
+        }
+        let read = colony_from_fields(&fields).expect("a 0.2.6 roster still reads");
+        assert!(
+            read.citizens
+                .iter()
+                .all(|citizen| citizen.saturation == MAX_SATURATION),
+            "an absent saturation is a new citizen's: full"
+        );
+    }
+
+    #[test]
+    fn the_record_carries_the_request_kind() {
+        let mut colony = colony();
+        colony.request(bo_request());
+        let mut ada = food_request();
+        ada.citizen = "c-1".to_owned();
+        ada.name = "Ada".to_owned();
+        ada.job = Job::Farmer;
+        colony.request(ada);
+        let fields = colony_fields(&colony);
+        let read = colony_from_fields(&fields).expect("the record reads");
+        assert_eq!(read, colony);
+        assert_eq!(
+            read.open_request("c-2").map(|request| request.need),
+            Some(Need::Tool)
+        );
+        assert_eq!(
+            read.open_request("c-1").map(|request| request.need),
+            Some(Need::Food)
+        );
+    }
+
+    #[test]
+    fn a_request_row_saved_before_the_kind_existed_reads_a_tool() {
+        let mut colony = colony();
+        colony.request(bo_request());
+        let mut fields = colony_fields(&colony);
+        for (key, value) in &mut fields {
+            if *key == "Requests"
+                && let Value::Requests(rows) = value
+            {
+                for row in rows {
+                    row.need = None;
+                }
+            }
+        }
+        let read = colony_from_fields(&fields).expect("a 0.2.6 record still reads");
+        assert_eq!(
+            read.open_request("c-2").map(|request| request.need),
+            Some(Need::Tool),
+            "0.2.6's only request family was the tool"
+        );
     }
 }

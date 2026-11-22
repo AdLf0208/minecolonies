@@ -1,9 +1,57 @@
-# VALIDATION — MineColonies slices 1, 2, 3 and 4
+# VALIDATION — MineColonies slices 1, 2, 3, 4 and 5
 
 Validated on Linux with Rust 1.97/1.99 against **Horizon
 `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** (Nightly 2026-11-20) and horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, through `ports/tools/build-slot.sh`
 (`CARGO_INCREMENTAL=0`, no bare `cargo`, no `--target-dir`).
+
+## 0.2.7 — slice 5, the food request (2026-11-22)
+
+| Check | Command | Result |
+|---|---|---|
+| rules first (red) | `cargo test --offline`, the new rules as `panic!()`/`unimplemented!()` bodies | **71 passed, 9 failed** — `a job's food` / `not implemented: a work tick's saturation` / `not implemented: a hungry citizen` / `not implemented: the citizen's saturation` / the request kind / the record's saturation / the support round trip (`sdk-test-slice5-red.log`) |
+| tests | `cargo test --offline --locked` | **80 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --offline --locked --all-targets -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| format | `cargo fmt --check` | exit 0 (`sdk-fmt.log`) |
+| package, twice | `rm -f Cargo.lock && cargo horizon-mod build` ×2, `cmp` | `CMP:identical`, **81,477 B**, sha256 `63825cc5327a584ca837f0f2d0ee428cfc737d11122a993645a2e869aea0ac92` (`sdk-build.log`, `sdk-build-second.log`, `sdk-sha256.log`) |
+| registry check | `cargo horizon-mod check minecolonies.hmod` | `minecolonies 0.2.7 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`; 81,477 B, sha `63825cc5…` (`sdk-check.log`, run against that sha) |
+| source compile | `cargo horizon-mod check --uses minecolonies.hmod` | exit 0 (`sdk-check-uses.log`) |
+| fits the pin | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, sha `63825cc5…` (`sdk-fits.log`) |
+| fits another build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, sha `63825cc5…` (`sdk-fits-other.log`) |
+| content | `python3 tools/gen_assets.py --check` + `tools/assemble_content.py --check` | **25** assets byte-identical, `data/` matches (`sdk-assets.log`) |
+| no jar-derived asset | `python3 tools/check_provenance.py` | tree 25 files / 14,006 B; **jar-derived asset bytes: 0**, files matched 0, over 22,747 jar files (20,465 distinct hashes; 8,470 under `assets/minecolonies/**`) (`sdk-provenance.log`) |
+| package contents | unzip listing | **53 files**, `LICENSE` + `LICENSE-NOTICE.md`, no `Cargo.lock` (`sdk-entries.txt`) |
+| gate | `python3 ports/tools/verify-sdk-package.py minecolonies` | **1/1 package(s) verified** |
+| game build | `ports/tools/launcher-game.sh build minecolonies` | `Compiling minecolonies (1 of 1)` (0.2.7, so no cached-package reuse) |
+| in game | `build-slot.sh run … --step e2e -- bash tools/e2e.sh` | **PASS**, `EXIT:0`, phases A–O (`minecolonies-e2e/e2e-launcher.log`) |
+| control | `GAME=$CONTROL_GAME … tools/e2e.sh` | **FAIL** at `ctl place of minecolonies:blockhuttownhall … failed` / `Unknown item 'minecolonies:blockhuttownhall'`, `EXIT:1` (`e2e-launcher-control.log`) |
+| fail-capability (the meal) | `SATIETY_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: Bo reads full saturation, so the meal was applied`, `EXIT:1` (`e2e-satiety-selftest.log`) |
+| fail-capability (the hand) | `TOOL_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: Ada holds minecolonies:scythe, so the hand was written`, `EXIT:1` (`e2e-tool-selftest.log`) |
+| fail-capability (hand + depth) | `SELFTEST=1 … tools/e2e.sh` | **FAIL** at the same held read, `EXIT:1` (`e2e-selftest.log`) |
+| fail-capability (the break) | `HUT_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the broken hut reads missing, so the marker went with the block`, `EXIT:1` (`e2e-hut-selftest.log`) |
+| fail-capability (founding) | `FOUNDING_SELFTEST=1 … tools/e2e.sh` | **FAIL** `selftest: the second town hall was refused, as it should be`, `EXIT:1` (`e2e-founding-selftest.log`) |
+| log gate | `python3 ports/tools/check-e2e-logs.py minecolonies-e2e --strict` | `logs=9 ok=9 missing-exit=0 bad-exit=0`, exit 0 |
+| coverage | `python3 ports/tools/check-coverage.py minecolonies` | `missing_families=0 … missing=0`, exit 0; `food_request` and `citizen saturation` are `tested` rows |
+
+The in-game leg's new assertions, from `e2e-launcher.log`:
+
+```
+== O: a hungry worker asks the colony for food, and one bread feeds it ==
+  Bo: job Lumberjack, …, saturation 46/60, lumberjack's hut present, holding minecraft:iron_axe.
+  Bo starts at saturation 46/60
+  saturation 46 -> 41 over 200 ticks, the whole tree still stands
+  Bo: … saturation 0/60 (hungry), lumberjack's hut present, holding minecraft:iron_axe.
+  1 request: Bo needs minecraft:bread
+  at zero saturation the tree is whole and the colony owes Bo a bread
+  Bo: … saturation 59/60, lumberjack's hut present, holding minecraft:iron_axe.
+  the bread left the chest, Bo reads fed and the request cleared
+  the fed lumberjack felled the tree at 2022,-8
+```
+
+The tree stands 18 blocks from Bo — outside the lumberjack's 16-block search — so it cannot fall
+while the saturation is read; after the meal the citizen is moved beside it, which is what makes the
+last assertion about the job. `SATIETY_SELFTEST=1` inverts the "fed" read, so a port whose meal was
+never applied passes the inverted leg and fails the normal one.
 
 ## 0.2.6 — slice 4, the tool request (2026-11-22)
 

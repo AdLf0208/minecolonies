@@ -57,6 +57,11 @@
 #     untouched, and puts 8 cobblestone in the colony's chest;
 # M1  the MINE is the miner's building: placed inside the colony, `/job info` reads "mine present"
 #     before the assignment is accepted;
+#  O  a HUNGRY worker asks the colony for food: with the chest empty and a whole tree inside the
+#     colony but outside the lumberjack's search, `/job info` reads the saturation every work tick
+#     until it reaches 0, the tree stays whole, and `/minecolonies requests` reads
+#     `1 request: Bo needs minecraft:bread`; one bread in the chest is eaten, the saturation reads
+#     full again, the request clears and the fed lumberjack walks to the tree and fells it;
 #  N  the five carried recipes (town hall, farmer's hut, lumberjack's hut, mine, scythe) are
 #     crafted in a real crafting table, each asserting its id, its count, an emptied grid and a
 #     consumed ingredient, with wrong-ingredient controls that must craft nothing; the scythe is
@@ -74,7 +79,9 @@
 # FOUNDING_SELFTEST=1 flips C's expectation instead (the second town hall must have been
 # refused), the slice-1 leg. HUT_SELFTEST=1 flips L3 (a broken hut must still read "present"), so
 # a port whose marker outlived its block passes that leg and fails the normal one: the break
-# assertion can fail.
+# assertion can fail. SATIETY_SELFTEST=1 flips O's "fed" read: after the bread the citizen must
+# still read `saturation 0/60 (hungry)`, so a port whose meal was never applied passes the
+# inverted leg and fails the normal one.
 #
 # The game must be a build of `horizon-mod.toml`'s `[native]` pin: a native `.hmod`'s Rust is
 # compiled by the launcher against exactly that build, so a game built at another pin is not
@@ -89,6 +96,7 @@ TOOL_SELFTEST=${TOOL_SELFTEST:-$SELFTEST}
 MINER_SELFTEST=${MINER_SELFTEST:-$SELFTEST}
 FOUNDING_SELFTEST=${FOUNDING_SELFTEST:-0}
 HUT_SELFTEST=${HUT_SELFTEST:-0}
+SATIETY_SELFTEST=${SATIETY_SELFTEST:-0}
 
 CLONE=${CLONE:-$(cd "$(dirname "$0")/../../.." && pwd)}
 PORT=$CLONE/ports/minecolonies
@@ -132,6 +140,8 @@ MINE_X=$((X0 + 6)); MINE_Y=$((FLOOR + 1)); MINE_Z=4
 SHAFT_TOP=$FLOOR
 SHAFT_BOTTOM=$((FLOOR - 8))
 EXPECT_DEPTH=${EXPECT_DEPTH:-8}
+# A citizen's full saturation (`ICitizenData.MAX_SATURATION`): the readout is `N/60`.
+FULL_SATURATION=60
 if [ "$MINER_SELFTEST" = 1 ]; then
     # The counterfactual: a miner one block short must fail the depth assertion.
     EXPECT_DEPTH=$((EXPECT_DEPTH + 1))
@@ -363,6 +373,47 @@ expect_holding() { # expect_holding NAME ITEM
     else
         grep -q "holding $item" <<<"$job_line" || fail "$name does not hold $item: $job_line"
     fi
+}
+
+# `/minecolonies job info NAME` reports the citizen at FULL saturation after its meal. Under
+# SATIETY_SELFTEST=1 the expectation is inverted (it must still read hungry): a port that never
+# applied the meal passes the inverted leg and fails the normal one.
+expect_satiated() { # expect_satiated NAME
+    local name=$1 job_line fed
+    say "minecolonies job info $name"
+    job_line=$(line "$name: job") || fail "no /job info line for $name"
+    echo "  $job_line" >&2
+    if [ "$SATIETY_SELFTEST" = 1 ]; then
+        echo "(selftest: $name must still read 'saturation 0/60 (hungry)' although it ate)"
+        grep -q "saturation 0/$FULL_SATURATION (hungry)" <<<"$job_line" \
+            || fail "selftest: $name reads full saturation, so the meal was applied"
+        return 0
+    fi
+    # The meal fills the citizen; a work tick after it spends a point, so the read is "nearly
+    # full", not exactly full. The falling read is the ceiling a fed citizen has.
+    if grep -q "saturation 0/$FULL_SATURATION (hungry)" <<<"$job_line"; then
+        fail "$name still reads hungry after its meal: $job_line"
+    fi
+    fed=$(saturation_of "$job_line")
+    [ -n "$fed" ] || fail "job info does not report $name's saturation: $job_line"
+    [ "$fed" -ge $((FULL_SATURATION - 10)) ] \
+        || fail "$name reads only $fed/$FULL_SATURATION after its meal: $job_line"
+}
+
+# The saturation a `/job info` line reports (`saturation 37/60` -> `37`).
+saturation_of() { sed -n 's/.*saturation \([0-9]\{1,\}\)\/[0-9]\{1,\}.*/\1/p' <<<"$1"; }
+
+# Bo's saturation as `/minecolonies job info Bo` reads it (a chat round trip).
+bo_saturation() {
+    say "minecolonies job info Bo"
+    local job_line
+    job_line=$(line "Bo: job") || return 1
+    saturation_of "$job_line"
+}
+
+# Bo is at zero saturation: the work tick's predicate.
+bo_hungry() {
+    [ "$(bo_saturation)" = 0 ]
 }
 
 # A block's id at a position, without its state properties (`minecraft:oak_leaves[distance=7,…]`
@@ -771,6 +822,11 @@ assign_job() { # assign_job NAME JOB NEEDLE
 lumberjack_job() {
     echo "== L: a lumberjack fells whole trees, leaves the leaves, and replants from the chest =="
     stand_by_the_hall
+    # The farmer's run is over (I, J and K proved it), so its job is parked: an employed citizen
+    # spends saturation every work tick and would ask for food during these long waits, making a
+    # one-request readout ambiguous. The colony's request readouts below name one worker at a time.
+    say "minecolonies job assign Ada unemployed"
+    ctl wait 12 >/dev/null
     # The chest starts EMPTY: the tool request must begin from a colony with no axe at all.
     ctl command "execute in minecraft:the_end run setblock $CHEST_X $CHEST_Y $CHEST_Z minecraft:air" >/dev/null
     ctl wait 2 >/dev/null
@@ -991,6 +1047,81 @@ miner_job() {
     echo "  the shaft is 1x1 and $depth deep, the bedrock untouched, 8 cobblestone in the chest" >&2
 }
 
+food_request_job() {
+    echo "== O: a hungry worker asks the colony for food, and one bread feeds it =="
+    stand_by_the_hall
+    # The miner's run is over too (M, M1): its job is parked so Bo is the only employed citizen
+    # in this phase and the request readout is the colony's one open request.
+    say "minecolonies job assign Cass unemployed"
+    ctl wait 12 >/dev/null
+    # The lumberjack's hut was broken in L3: put it back, so the job's own rule can run again.
+    place "$LHUT_X" "$LHUT_Y" "$LHUT_Z" minecolonies:blockhutlumberjack
+    block_is "$LHUT_X" "$LHUT_Y" "$LHUT_Z" minecolonies:blockhutlumberjack \
+        || fail "the lumberjack's hut did not place again"
+    # The colony's chest starts EMPTY: the food request must begin with no meal in the colony.
+    ctl command "execute in minecraft:the_end run setblock $CHEST_X $CHEST_Y $CHEST_Z minecraft:air" >/dev/null
+    ctl wait 2 >/dev/null
+    must_setblock "$CHEST_X" "$CHEST_Y" "$CHEST_Z" minecraft:chest
+    [ "$(chest_count minecraft:bread)" = 0 ] || fail "the colony's chest is not empty"
+    # A whole four-log tree inside the colony but farther than the lumberjack's 16-block search
+    # (the counterfactual: it must stand while the saturation falls), and it is the tree the fed
+    # lumberjack fells afterwards.
+    local tree_x=$((X0 + 22)) tree_z=-8 start falling job_line
+    plant_tree "$tree_x" "$tree_z"
+    say "minecolonies job info Bo"
+    job_line=$(line "Bo: job") || fail "no /job info line for Bo"
+    echo "  $job_line" >&2
+    grep -q "lumberjack's hut present" <<<"$job_line" \
+        || fail "job info does not see the lumberjack's hut: $job_line"
+    grep -q "holding minecraft:iron_axe" <<<"$job_line" \
+        || fail "Bo lost its axe between the fell and the food phase: $job_line"
+    start=$(saturation_of "$job_line")
+    [ -n "$start" ] || fail "job info does not report Bo's saturation: $job_line"
+    echo "  Bo starts at saturation $start/$FULL_SATURATION" >&2
+    # One point per work tick: the read falls, and the whole tree stays where it is.
+    ctl wait 200 >/dev/null
+    say "minecolonies job info Bo"
+    job_line=$(line "Bo: job") || fail "no /job info line for Bo"
+    falling=$(saturation_of "$job_line")
+    [ -n "$falling" ] || fail "job info does not report Bo's saturation: $job_line"
+    [ "$falling" -lt "$start" ] \
+        || fail "the saturation did not fall over 200 ticks ($start -> $falling)"
+    tree_stands "$tree_x" "$tree_z" || fail "the tree fell while the saturation was still falling"
+    echo "  saturation $start -> $falling over 200 ticks, the whole tree still stands" >&2
+    # Down to zero, where the work stops and the colony is asked for food.
+    if ! await_ticks 2800 40 bo_hungry; then
+        info
+        fail "Bo's saturation never reached 0 (last read '$(bo_saturation)')"
+    fi
+    say "minecolonies job info Bo"
+    job_line=$(line "Bo: job") || fail "no /job info line for Bo at zero saturation"
+    echo "  $job_line" >&2
+    grep -q "saturation 0/$FULL_SATURATION (hungry)" <<<"$job_line" \
+        || fail "Bo is not reported hungry at zero: $job_line"
+    expect_request "1 request: Bo needs minecraft:bread"
+    tree_stands "$tree_x" "$tree_z" || fail "a hungry lumberjack felled the tree anyway"
+    echo "  at zero saturation the tree is whole and the colony owes Bo a bread" >&2
+    # One bread in the chest: the citizen eats it, reads full again and the request clears.
+    ctl container "$CHEST_X" "$CHEST_Y" "$CHEST_Z" minecraft:bread 1 >/dev/null
+    ctl wait 4 >/dev/null
+    if ! await_ticks 400 40 requests_none; then
+        info
+        fail "Bo's bread request never cleared although the chest held a bread"
+    fi
+    [ "$(chest_count minecraft:bread)" = 0 ] \
+        || fail "the bread is in the chest and eaten at the same time"
+    expect_satiated Bo
+    echo "  the bread left the chest, Bo reads fed and the request cleared" >&2
+    # The job runs again: Bo is moved beside the tree (it was outside the search) and fells it.
+    ctl command "execute in minecraft:the_end run tp @e[type=minecolonies:citizen,name=Bo] $((tree_x - 3)).5 $((FLOOR + 1)) $tree_z.5" >/dev/null
+    ctl wait 20 >/dev/null
+    if ! await_ticks 1200 40 tree_felled "$tree_x" "$tree_z"; then
+        info
+        fail "the fed lumberjack did not fell the tree at $tree_x,$tree_z"
+    fi
+    echo "  the fed lumberjack felled the tree at $tree_x,$tree_z" >&2
+}
+
 # Every carried recipe, crafted the way it declares; every carried item read back; an unknown id
 # refused. The old `data/` was never exercised: a recipe that is never crafted is dead data.
 craft_and_items() {
@@ -1023,6 +1154,7 @@ no_colony_control
 persistence
 lumberjack_job
 miner_job
+food_request_job
 craft_and_items
 
-echo "PASS: the town hall founded a persisted colony (name, owner, 64-block radius), a second hall was refused when too close (including 120 blocks across and 120 up) and when the owner had one already, a citizen joined, took the farmer's job, REQUESTED its scythe, took it from the colony's chest into its hand and harvested a mature crop and walked to the next, a citizen with no colony did nothing, the colony and its job survived quit and relaunch (the held scythe still in hand), a lumberjack with no axe in the colony requested one and left the whole tree standing until it was given one, then felled two whole four-log trees (leaves untouched, 4 logs in the colony's chest each, a sapling replanted only when the chest held one) while an unemployed citizen left its tree whole, and a miner with no pickaxe requested one and left the column whole until it was given one, then sank a 1x1 8-block shaft to the bedrock (bedrock and its neighbours untouched, 8 cobblestone in the chest) while an unemployed citizen left its column whole, both job buildings are the jobs' own (the lumberjack's hut refused, then seen, then missing once broken; the mine seen before the miner works), and all five carried recipes crafted their id and count in a real table with wrong-ingredient controls that crafted nothing"
+echo "PASS: the town hall founded a persisted colony (name, owner, 64-block radius), a second hall was refused when too close (including 120 blocks across and 120 up) and when the owner had one already, a citizen joined, took the farmer's job, REQUESTED its scythe, took it from the colony's chest into its hand and harvested a mature crop and walked to the next, a citizen with no colony did nothing, the colony and its job survived quit and relaunch (the held scythe still in hand), a lumberjack with no axe in the colony requested one and left the whole tree standing until it was given one, then felled two whole four-log trees (leaves untouched, 4 logs in the colony's chest each, a sapling replanted only when the chest held one) while an unemployed citizen left its tree whole, and a miner with no pickaxe requested one and left the column whole until it was given one, then sank a 1x1 8-block shaft to the bedrock (bedrock and its neighbours untouched, 8 cobblestone in the chest) while an unemployed citizen left its column whole, both job buildings are the jobs' own (the lumberjack's hut refused, then seen, then missing once broken; the mine seen before the miner works), a hungry lumberjack asked the colony for a bread while its whole tree stood outside its reach, one bread from the colony's chest fed it, cleared the request and let it fell the tree, and all five carried recipes crafted their id and count in a real table with wrong-ingredient controls that crafted nothing"
